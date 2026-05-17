@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { signInAnonymously } from 'firebase/auth';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import './styles.css';
 
@@ -547,30 +547,250 @@ function ReportsView({ activeDate }) {
   }, [activeDate]);
 
   useEffect(() => {
-    fetch(`${API_BASE_URL}/compras-opciones`)
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error('No se pudieron cargar materiales y jornadas.')))
-      .then(setOptions)
-      .catch((err) => setError(err.message));
-  }, []);
+    let active = true;
+
+    async function loadOptions() {
+      try {
+        const nextOptions = await fetchReportOptionsFromApi();
+        if (active) setOptions(nextOptions);
+      } catch (_error) {
+        try {
+          const nextOptions = await loadReportOptionsFromFirestore(defaultReportFilters(activeDate));
+          if (active) setOptions(nextOptions);
+        } catch (_firestoreError) {
+          if (active) setOptions({ materiales: [], jornadas: [] });
+        }
+      }
+    }
+
+    loadOptions();
+    return () => {
+      active = false;
+    };
+  }, [activeDate]);
 
   async function generateReport(event) {
     event?.preventDefault();
     setLoading(true);
     setError('');
     try {
-      const params = new URLSearchParams();
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value) params.set(key, value);
-      });
-      const response = await fetch(`${API_BASE_URL}/reporte-compras?${params.toString()}`);
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || 'No se pudo generar el reporte.');
+      const payload = await fetchReportFromApi(filters);
+      setOptions((current) => mergeReportOptions(current, optionsFromCompras(payload.compras || [])));
       setReport(payload);
-    } catch (err) {
-      setError(err.message);
+    } catch (_apiError) {
+      try {
+        const payload = await generateReportFromFirestore(filters);
+        setOptions((current) => mergeReportOptions(current, optionsFromCompras(payload.compras || [])));
+        setReport(payload);
+      } catch (firestoreError) {
+        setError(`No se pudo generar el reporte desde Vercel. Revisa que las compras esten sincronizadas en Firestore. Detalle: ${firestoreError.message}`);
+      }
     } finally {
       setLoading(false);
     }
+  }
+
+  async function fetchReportFromApi(currentFilters) {
+    const params = new URLSearchParams();
+    Object.entries(currentFilters).forEach(([key, value]) => {
+      if (value) params.set(key, value);
+    });
+    const response = await fetch(`${API_BASE_URL}/reporte-compras?${params.toString()}`);
+    const payload = await readJson(response);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || 'No se pudo generar el reporte.');
+    }
+
+    return payload;
+  }
+
+  async function fetchReportOptionsFromApi() {
+    const response = await fetch(`${API_BASE_URL}/compras-opciones`);
+    const payload = await readJson(response);
+
+    if (!response.ok) {
+      throw new Error(payload?.error || 'No se pudieron cargar materiales y jornadas.');
+    }
+
+    return payload;
+  }
+
+  async function generateReportFromFirestore(currentFilters) {
+    const desde = normalizeReportDateTime(currentFilters.desde);
+    const hasta = normalizeReportDateTime(currentFilters.hasta);
+    const material = trimReportText(currentFilters.material);
+    const jornada = trimReportText(currentFilters.jornada);
+
+    if (!desde || !hasta) {
+      throw new Error('Debes elegir desde y hasta.');
+    }
+
+    const compras = await loadComprasFromFirestore({ desde, hasta });
+    const filtered = compras
+      .map(normalizeCompraForReport)
+      .filter((compra) => {
+        const compraDateTime = compraDateTimeText(compra);
+        if (compraDateTime < desde || compraDateTime > hasta) return false;
+        if (material && normalizeText(compra.material) !== normalizeText(material)) return false;
+        if (jornada && normalizeText(compra.jornada) !== normalizeText(jornada)) return false;
+        return true;
+      })
+      .sort((a, b) => compraDateTimeText(a).localeCompare(compraDateTimeText(b)) || a.material.localeCompare(b.material));
+
+    return summarizeReport(filtered, { desde, hasta, material, jornada });
+  }
+
+  async function loadReportOptionsFromFirestore(currentFilters) {
+    const compras = await loadComprasFromFirestore({
+      desde: currentFilters.desde,
+      hasta: currentFilters.hasta
+    });
+    return optionsFromCompras(compras);
+  }
+
+  async function loadComprasFromFirestore(currentFilters) {
+    const desde = normalizeReportDateTime(currentFilters.desde);
+    const hasta = normalizeReportDateTime(currentFilters.hasta);
+    const dates = datesBetween(desde.slice(0, 10), hasta.slice(0, 10));
+
+    const snapshots = await Promise.all(dates.map((date) => getDoc(doc(db, 'compras_diarias', date))));
+    return snapshots.flatMap((snapshot, index) => {
+      if (!snapshot.exists()) return [];
+      return normalizeCompras(snapshot.data(), dates[index]).compras;
+    });
+  }
+
+  function summarizeReport(compras, filtros) {
+    const totalSubtotal = roundMoney(compras.reduce((sum, compra) => sum + num(compra.subtotal), 0));
+    const totalPesoKg = roundWeight(compras.reduce((sum, compra) => sum + num(compra.peso_neto_kg), 0));
+    const porMaterial = groupReportTotals(compras, 'material');
+    const porJornada = groupReportTotals(compras, 'jornada');
+    const porMaterialJornada = compras.reduce((acc, compra) => {
+      const materialName = compra.material || 'Sin material';
+      const jornadaName = compra.jornada || 'Sin jornada';
+      const key = `${materialName} / ${jornadaName}`;
+      const current = acc[key] || {
+        material: materialName,
+        jornada: jornadaName,
+        totalSubtotal: 0,
+        totalPesoKg: 0,
+        cantidadRegistros: 0
+      };
+      current.totalSubtotal = roundMoney(current.totalSubtotal + num(compra.subtotal));
+      current.totalPesoKg = roundWeight(current.totalPesoKg + num(compra.peso_neto_kg));
+      current.cantidadRegistros += 1;
+      acc[key] = current;
+      return acc;
+    }, {});
+
+    return {
+      filtros,
+      totalSubtotal,
+      totalPesoKg,
+      cantidadRegistros: compras.length,
+      porMaterial,
+      porJornada,
+      porMaterialJornada,
+      compras,
+      generadoEn: new Date().toISOString()
+    };
+  }
+
+  function groupReportTotals(compras, field) {
+    return compras.reduce((acc, compra) => {
+      const fallback = field === 'material' ? 'Sin material' : 'Sin jornada';
+      const name = compra[field] || fallback;
+      const current = acc[name] || { nombre: name, totalSubtotal: 0, totalPesoKg: 0, cantidadRegistros: 0 };
+      current.totalSubtotal = roundMoney(current.totalSubtotal + num(compra.subtotal));
+      current.totalPesoKg = roundWeight(current.totalPesoKg + num(compra.peso_neto_kg));
+      current.cantidadRegistros += 1;
+      acc[name] = current;
+      return acc;
+    }, {});
+  }
+
+  function normalizeCompraForReport(compra, index) {
+    const fecha = String(compra?.fecha || '').slice(0, 10);
+    const hora = normalizeReportTime(compra?.hora_registro_salida);
+    const material = trimReportText(compra?.material);
+    const jornada = trimReportText(compra?.jornada);
+
+    return {
+      id: compra?.id || `${fecha}-${hora}-${material}-${jornada}-${index}`,
+      fecha,
+      material,
+      peso_neto_kg: num(compra?.peso_neto_kg),
+      subtotal: num(compra?.subtotal),
+      hora_registro_salida: hora,
+      jornada
+    };
+  }
+
+  function optionsFromCompras(compras) {
+    return {
+      materiales: uniqueSorted(compras.map((compra) => trimReportText(compra.material)).filter(Boolean)),
+      jornadas: uniqueSorted(compras.map((compra) => trimReportText(compra.jornada)).filter(Boolean))
+    };
+  }
+
+  function mergeReportOptions(current, next) {
+    return {
+      materiales: uniqueSorted([...(current.materiales || []), ...(next.materiales || [])]),
+      jornadas: uniqueSorted([...(current.jornadas || []), ...(next.jornadas || [])])
+    };
+  }
+
+  function uniqueSorted(values) {
+    return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  }
+
+  function normalizeReportDateTime(value) {
+    const text = String(value || '').replace(' ', 'T').trim();
+    if (!text) return '';
+    if (text.length === 10) return `${text}T00:00:00`;
+    if (text.length === 16) return `${text}:00`;
+    return text.slice(0, 19);
+  }
+
+  function normalizeReportTime(value) {
+    const text = String(value || '').trim();
+    if (!text) return '00:00:00';
+    const time = text.includes('T') ? text.slice(11, 19) : text.slice(0, 8);
+    return time.length === 5 ? `${time}:00` : time || '00:00:00';
+  }
+
+  function compraDateTimeText(compra) {
+    return `${compra.fecha}T${normalizeReportTime(compra.hora_registro_salida)}`;
+  }
+
+  function datesBetween(startDate, endDate) {
+    const dates = [];
+    const current = new Date(`${startDate}T12:00:00`);
+    const end = new Date(`${endDate}T12:00:00`);
+
+    if (Number.isNaN(current.getTime()) || Number.isNaN(end.getTime()) || current > end) {
+      return dates;
+    }
+
+    while (current <= end) {
+      dates.push(current.toISOString().slice(0, 10));
+      current.setDate(current.getDate() + 1);
+    }
+
+    return dates;
+  }
+
+  function trimReportText(value) {
+    return String(value || '').trim();
+  }
+
+  function roundMoney(value) {
+    return Math.round(num(value) * 100) / 100;
+  }
+
+  function roundWeight(value) {
+    return Math.round(num(value) * 1000) / 1000;
   }
 
   function updateFilter(field, value) {
