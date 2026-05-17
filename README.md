@@ -12,6 +12,8 @@ npm run dev
 
 En Windows tambien puedes usar `abrir_app.bat`; abre la API de compras y luego la app web.
 
+Para que la sincronizacion MySQL -> Firestore arranque sola al encender el PC, ejecuta `instalar_sincronizacion_inicio.bat`. Esto crea una tarea de Windows que inicia el backend al entrar a tu usuario. El backend sincroniza una vez al arrancar y luego cada `SYNC_INTERVAL_SECONDS` segundos. Para desactivarlo, ejecuta `quitar_sincronizacion_inicio.bat`.
+
 ## Backend Node.js + Express
 
 Copia `.env.example` como `.env` y completa:

@@ -12,6 +12,7 @@ const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD
 const denominations = [100, 50, 20, 10, 5, 1, 0.25, 0.1, 0.05, 0.01];
 const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], updatedAt: '' };
 const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], actualizadoEn: '' };
+const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
 
 function App() {
   const [data, setData] = useState(defaultData);
@@ -536,7 +537,7 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
 }
 
 function ReportsView({ activeDate }) {
-  const [options, setOptions] = useState({ materiales: [], jornadas: [] });
+  const [options, setOptions] = useState(defaultReportOptions);
   const [filters, setFilters] = useState(() => defaultReportFilters(activeDate));
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -552,13 +553,13 @@ function ReportsView({ activeDate }) {
     async function loadOptions() {
       try {
         const nextOptions = await fetchReportOptionsFromApi();
-        if (active) setOptions(nextOptions);
+        if (active) setOptions((current) => mergeReportOptions(current, nextOptions));
       } catch (_error) {
         try {
           const nextOptions = await loadReportOptionsFromFirestore(defaultReportFilters(activeDate));
-          if (active) setOptions(nextOptions);
+          if (active) setOptions((current) => mergeReportOptions(current, nextOptions));
         } catch (_firestoreError) {
-          if (active) setOptions({ materiales: [], jornadas: [] });
+          if (active) setOptions(defaultReportOptions);
         }
       }
     }
@@ -737,7 +738,11 @@ function ReportsView({ activeDate }) {
   function mergeReportOptions(current, next) {
     return {
       materiales: uniqueSorted([...(current.materiales || []), ...(next.materiales || [])]),
-      jornadas: uniqueSorted([...(current.jornadas || []), ...(next.jornadas || [])])
+      jornadas: uniqueSorted([
+        ...defaultReportOptions.jornadas,
+        ...(current.jornadas || []),
+        ...(next.jornadas || [])
+      ])
     };
   }
 
