@@ -9,7 +9,7 @@ const DATA_REF = doc(db, 'arqueos', 'almetales');
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 const SESSION_KEY = 'arqueo-recicladora-session';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-const denominations = [100, 50, 20, 10, 5, 1, 0.25, 0.1, 0.05, 0.01];
+const denominations = [20, 10, 5, 1, 0.5, 0.25, 0.1, 0.05];
 const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], updatedAt: '' };
 const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], actualizadoEn: '' };
 const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
@@ -254,7 +254,7 @@ function App() {
         <div className="brand">
           <div className="brand-mark">$</div>
           <div>
-            <h1>Arqueo Recicladora</h1>
+            <h1>ALMETALES</h1>
             <span>Turno dia y turno noche</span>
           </div>
         </div>
@@ -280,7 +280,7 @@ function App() {
             <h2>{pageCopy[activeView][0]}</h2>
             <p>{pageCopy[activeView][1]}</p>
             <SyncStatus loading={loading} error={syncError} updatedAt={data.updatedAt} />
-            <ComprasSyncStatus compras={comprasDiarias} error={comprasError} />
+            {ownerUnlocked && <ComprasSyncStatus compras={comprasDiarias} error={comprasError} />}
           </div>
           <div className="toolbar">
             <input type="date" value={activeDate} onChange={(event) => setActiveDate(event.target.value)} aria-label="Fecha activa" />
@@ -292,7 +292,6 @@ function App() {
         {activeView === 'employee' && (
           <EmployeeView
             shifts={dayItems}
-            compras={comprasDiarias}
             deleteUnlocked={deleteUnlocked}
             onOpenShift={() => setShiftModal(openShiftForm(data.shifts, activeDate, null, ownerUnlocked, session.name, comprasDiarias))}
             onOpenMovement={(type) => setMovementModal(openMovementForm(data.shifts, activeDate, null, type, session.name))}
@@ -361,7 +360,7 @@ function Login({ data, loading, syncError, onLogin }) {
         <div className="brand login-brand">
           <div className="brand-mark">$</div>
           <div>
-            <h1>Arqueo Recicladora</h1>
+            <h1>ALMETALES</h1>
             <span>Sincronizado con Firestore</span>
           </div>
         </div>
@@ -383,7 +382,7 @@ function Login({ data, loading, syncError, onLogin }) {
   );
 }
 
-function EmployeeView({ shifts, compras, deleteUnlocked, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
+function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
   const movements = shifts.flatMap((shift) => (shift.movements || []).map((movement) => ({ ...movement, shiftName: shift.shiftName, shiftId: shift.id })));
   const incomes = movements.filter((movement) => movement.type === 'ingreso');
   const expenses = movements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro');
@@ -398,17 +397,6 @@ function EmployeeView({ shifts, compras, deleteUnlocked, onOpenShift, onOpenMove
           <button className="primary" onClick={onOpenShift}>Cerrar turno</button>
         </div>
         <p>Registra cada ingreso o gasto cuando ocurre. Al final cuenta el efectivo que dejas para el siguiente turno.</p>
-      </div>
-      <div className="panel span-12 compras-panel">
-        <div className="section-title">
-          <h3>Compras sincronizadas</h3>
-          <span className="status info">{money.format(num(compras.totalDiario))}</span>
-        </div>
-        <div className="compras-summary">
-          <span>{compras.cantidadRegistros || 0} registros</span>
-          <span>{num(compras.totalPesoKg).toLocaleString('es-CO')} kg netos</span>
-          <span>Actualizado: {compras.actualizadoEn ? timeText(compras.actualizadoEn) : 'pendiente'}</span>
-        </div>
       </div>
       <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onDelete={onDeleteMovement} />
       <MovementBox title="Gastos registrados" total={expenseTotal} status="bad" movements={expenses} emptyText="No hay gastos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('gasto')} onDelete={onDeleteMovement} />
@@ -467,6 +455,7 @@ function MovementBox({ title, total, status, movements, emptyText, canDelete, on
 
 function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
   const purchases = compras.cantidadRegistros ? cents(compras.totalDiario) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
+  const incomes = shifts.reduce((sum, shift) => sum + movementTotals(shift).ingreso, 0);
   const expenses = shifts.reduce((sum, shift) => sum + movementTotals(shift).gasto + movementTotals(shift).retiro, 0);
   const left = shifts.reduce((sum, shift) => sum + cashLeft(shift.denoms), 0);
   const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
@@ -474,6 +463,7 @@ function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift
   return (
     <section className="grid">
       <Metric title="Compras reportadas" value={money.format(fromCents(purchases))} note={compras.cantidadRegistros ? `${compras.cantidadRegistros} registros sincronizados` : 'Sistema de pesaje'} />
+      <Metric title="Ingresos totales" value={money.format(fromCents(incomes))} note="Ventas y entradas a caja" />
       <Metric title="Gastos y retiros" value={money.format(fromCents(expenses))} note="Registrados por turno" />
       <Metric title="Efectivo dejado" value={money.format(fromCents(left))} note="Contado por denominaciones" />
       <Metric title="Diferencia neta" value={money.format(fromCents(diff))} note={shifts.length ? diffText(diff) : 'Sin cierres'} />
@@ -991,9 +981,9 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
           <label className="span-field-3">Turno<select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required><option>Turno dia</option><option>Turno noche</option></select></label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" min="0" step="0.01" value={form.openingCash} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
-          <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>
-          <label className="span-field-4">Estado del turno<select value={form.status} onChange={(event) => setField('status', event.target.value)}><option value="abierto">Abierto</option><option value="cerrado">Cerrado</option></select></label>
-          <label className="span-field-4">Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
+          {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
+          <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<select value={form.status} onChange={(event) => setField('status', event.target.value)}><option value="abierto">Abierto</option><option value="cerrado">Cerrado</option></select></label>
+          <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
         <div className="section-title denom-title">
           <h3>Efectivo que deja para el siguiente turno</h3>
@@ -1264,14 +1254,7 @@ function autoOpeningCash(shifts, date, shiftName) {
 function purchaseTotalForShift(compras, shiftName) {
   const entries = Object.values(compras?.porJornada || {});
   const matched = entries.filter((entry) => jornadaMatchesShift(entry.jornada, shiftName));
-
-  if (matched.length) {
-    return matched.reduce((sum, entry) => sum + num(entry.totalSubtotal), 0);
-  }
-
-  if (entries.length === 1) return num(entries[0].totalSubtotal);
-
-  return 0;
+  return matched.reduce((sum, entry) => sum + num(entry.totalSubtotal), 0);
 }
 
 function jornadaMatchesShift(jornada, shiftName) {
@@ -1279,7 +1262,7 @@ function jornadaMatchesShift(jornada, shiftName) {
   const shift = normalizeText(shiftName);
 
   if (!value) return false;
-  if (shift.includes('noche')) return value.includes('noche') || value.includes('nocturna') || value === '2';
+  if (shift.includes('noche')) return value.includes('noche') || value.includes('noctur') || value === '2';
   if (shift.includes('dia')) return value.includes('dia') || value.includes('diurna') || value.includes('manana') || value === '1';
 
   return value === shift;
