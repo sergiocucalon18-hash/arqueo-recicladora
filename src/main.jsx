@@ -11,7 +11,7 @@ const SESSION_KEY = 'arqueo-recicladora-session';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const denominations = [20, 10, 5, 1, 0.5, 0.25, 0.1, 0.05];
 const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], updatedAt: '' };
-const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], actualizadoEn: '' };
+const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], opciones: null, actualizadoEn: '' };
 const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
 
 function App() {
@@ -154,9 +154,11 @@ function App() {
       employeeName: form.employeeName.trim(),
       openingCash: ownerUnlocked ? num(form.openingCash) : autoOpeningCash(data.shifts, form.date, form.shiftName),
       purchaseTotal: num(form.purchaseTotal),
-      status: form.status,
+      status: 'cerrado',
       notes: form.notes.trim(),
       denoms: form.denoms,
+      otherCashAmount: num(form.otherCashAmount),
+      otherCashReason: String(form.otherCashReason || '').trim(),
       movements: existing?.movements || [],
       savedAt: new Date().toISOString()
     };
@@ -457,7 +459,7 @@ function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift
   const purchases = compras.cantidadRegistros ? cents(compras.totalDiario) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
   const incomes = shifts.reduce((sum, shift) => sum + movementTotals(shift).ingreso, 0);
   const expenses = shifts.reduce((sum, shift) => sum + movementTotals(shift).gasto + movementTotals(shift).retiro, 0);
-  const left = shifts.reduce((sum, shift) => sum + cashLeft(shift.denoms), 0);
+  const left = shifts.reduce((sum, shift) => sum + shiftCashLeft(shift), 0);
   const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
 
   return (
@@ -495,7 +497,7 @@ function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift
 function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
   const totals = movementTotals(shift);
   const expected = expectedLeft(shift);
-  const left = cashLeft(shift.denoms);
+  const left = shiftCashLeft(shift);
   const diff = shiftDiff(shift);
   return (
     <>
@@ -521,6 +523,15 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
           <td><RowActions onEdit={() => onOpenMovement(movement.id)} onDelete={() => onDeleteMovement(shift.id, movement.id)} /></td>
         </tr>
       ))}
+      {num(shift.otherCashAmount) > 0 && (
+        <tr className="subrow">
+          <td colSpan="3">Otros efectivo</td>
+          <td colSpan="4">{shift.otherCashReason || 'Sin detalle'}</td>
+          <td>{money.format(num(shift.otherCashAmount))}</td>
+          <td>{shift.employeeName || '-'}</td>
+          <td></td>
+        </tr>
+      )}
       {shift.notes && <tr><td colSpan="10" className="muted">Notas: {shift.notes}</td></tr>}
     </>
   );
@@ -539,6 +550,7 @@ function ReportsView({ activeDate }) {
 
   useEffect(() => {
     let active = true;
+    let timer = null;
 
     async function loadOptions() {
       try {
@@ -546,17 +558,24 @@ function ReportsView({ activeDate }) {
         if (active) setOptions((current) => mergeReportOptions(current, nextOptions));
       } catch (_error) {
         try {
-          const nextOptions = await loadReportOptionsFromFirestore(defaultReportFilters(activeDate));
+          const nextOptions = await loadGlobalReportOptionsFromFirestore(activeDate);
           if (active) setOptions((current) => mergeReportOptions(current, nextOptions));
-        } catch (_firestoreError) {
-          if (active) setOptions(defaultReportOptions);
+        } catch (_globalError) {
+          try {
+            const nextOptions = await loadReportOptionsFromFirestore(defaultReportFilters(activeDate));
+            if (active) setOptions((current) => mergeReportOptions(current, nextOptions));
+          } catch (_firestoreError) {
+            if (active) setOptions(defaultReportOptions);
+          }
         }
       }
     }
 
     loadOptions();
+    timer = setInterval(loadOptions, 30000);
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, [activeDate]);
 
@@ -640,6 +659,20 @@ function ReportsView({ activeDate }) {
     return optionsFromCompras(compras);
   }
 
+  async function loadGlobalReportOptionsFromFirestore(date) {
+    const candidates = [...new Set([date, today()])];
+
+    for (const candidate of candidates) {
+      const snapshot = await getDoc(doc(db, 'compras_diarias', candidate));
+      if (!snapshot.exists()) continue;
+
+      const options = normalizeReportOptions(snapshot.data()?.opciones);
+      if (options.materiales.length || options.jornadas.length) return options;
+    }
+
+    throw new Error('Sin opciones sincronizadas.');
+  }
+
   async function loadComprasFromFirestore(currentFilters) {
     const desde = normalizeReportDateTime(currentFilters.desde);
     const hasta = normalizeReportDateTime(currentFilters.hasta);
@@ -721,14 +754,23 @@ function ReportsView({ activeDate }) {
   function optionsFromCompras(compras) {
     return {
       materiales: uniqueSorted(compras.map((compra) => trimReportText(compra.material)).filter(Boolean)),
-      jornadas: uniqueSorted(compras.map((compra) => trimReportText(compra.jornada)).filter(Boolean))
+      jornadas: normalizeReportJornadas(compras.map((compra) => compra.jornada))
+    };
+  }
+
+  function normalizeReportOptions(value) {
+    const materiales = Array.isArray(value?.materiales) ? value.materiales : [];
+    const jornadas = Array.isArray(value?.jornadas) ? value.jornadas : [];
+    return {
+      materiales: uniqueSorted(materiales.map(trimReportText).filter(Boolean)),
+      jornadas: normalizeReportJornadas(jornadas)
     };
   }
 
   function mergeReportOptions(current, next) {
     return {
       materiales: uniqueSorted([...(current.materiales || []), ...(next.materiales || [])]),
-      jornadas: uniqueSorted([
+      jornadas: normalizeReportJornadas([
         ...defaultReportOptions.jornadas,
         ...(current.jornadas || []),
         ...(next.jornadas || [])
@@ -738,6 +780,17 @@ function ReportsView({ activeDate }) {
 
   function uniqueSorted(values) {
     return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  }
+
+  function normalizeReportJornadas(values) {
+    return uniqueSorted(values.map(normalizeReportJornada).filter(Boolean));
+  }
+
+  function normalizeReportJornada(value) {
+    const text = normalizeText(value);
+    if (text.includes('diurna') || text === '1') return 'DIURNA';
+    if (text.includes('noctur') || text.includes('noche') || text === '2') return 'NOCTURNA';
+    return '';
   }
 
   function normalizeReportDateTime(value) {
@@ -792,6 +845,10 @@ function ReportsView({ activeDate }) {
     setFilters((current) => ({ ...current, [field]: value }));
   }
 
+  function closeDatePicker(event) {
+    event.currentTarget.parentElement?.querySelector('input')?.blur();
+  }
+
   function setFullDay() {
     setFilters((current) => ({ ...current, desde: `${activeDate}T00:00`, hasta: `${activeDate}T23:59` }));
   }
@@ -814,10 +871,16 @@ function ReportsView({ activeDate }) {
         </div>
         <form className="form-grid" onSubmit={generateReport}>
           <label className="span-field-3">Desde
-            <input type="datetime-local" value={filters.desde} onChange={(event) => updateFilter('desde', event.target.value)} required />
+            <div className="input-action">
+              <input type="datetime-local" value={filters.desde} onChange={(event) => updateFilter('desde', event.target.value)} required />
+              <button type="button" className="input-ok" onClick={closeDatePicker}>OK</button>
+            </div>
           </label>
           <label className="span-field-3">Hasta
-            <input type="datetime-local" value={filters.hasta} onChange={(event) => updateFilter('hasta', event.target.value)} required />
+            <div className="input-action">
+              <input type="datetime-local" value={filters.hasta} onChange={(event) => updateFilter('hasta', event.target.value)} required />
+              <button type="button" className="input-ok" onClick={closeDatePicker}>OK</button>
+            </div>
           </label>
           <label className="span-field-3">Material
             <select value={filters.material} onChange={(event) => updateFilter('material', event.target.value)}>
@@ -956,7 +1019,7 @@ function SettingsView({ data, onSave, onImport, onClear }) {
 function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, onSubmit }) {
   const automatic = autoOpeningCash(shifts, form.date, form.shiftName);
   const syncedPurchases = purchaseTotalForShift(compras, form.shiftName);
-  const denomTotal = money.format(fromCents(cashLeft(form.denoms)));
+  const denomTotal = money.format(fromCents(cashLeft(form.denoms, form.otherCashAmount)));
 
   useEffect(() => {
     const next = { ...form };
@@ -982,7 +1045,7 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" min="0" step="0.01" value={form.openingCash} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
           {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
-          <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<select value={form.status} onChange={(event) => setField('status', event.target.value)}><option value="abierto">Abierto</option><option value="cerrado">Cerrado</option></select></label>
+          <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<input value="Cierre de caja" readOnly /></label>
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
         <div className="section-title denom-title">
@@ -995,6 +1058,10 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
               <input type="number" min="0" step="1" value={form.denoms[denom] ?? 0} onChange={(event) => onChange({ ...form, denoms: { ...form.denoms, [denom]: num(event.target.value) } })} />
             </label>
           ))}
+          <label className="denom denom-other"><b>Otros</b>
+            <input type="number" min="0" step="0.01" value={form.otherCashAmount ?? 0} onChange={(event) => setField('otherCashAmount', event.target.value)} />
+            <input value={form.otherCashReason} onChange={(event) => setField('otherCashReason', event.target.value)} placeholder="Motivo o detalle" />
+          </label>
         </div>
         <div className="modal-foot">
           <button type="button" className="secondary" onClick={onClose}>Cancelar</button>
@@ -1149,9 +1216,11 @@ function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, comp
     employeeName: shift?.employeeName || fallbackName || '',
     openingCash: shift?.openingCash ?? autoOpeningCash(shifts, date, shiftName),
     purchaseTotal: shift?.purchaseTotal ?? syncedPurchases,
-    status: shift?.status || 'cerrado',
+    status: 'cerrado',
     notes: shift?.notes || '',
-    denoms: denominations.reduce((acc, denom) => ({ ...acc, [denom]: shift?.denoms?.[denom] ?? 0 }), {})
+    denoms: denominations.reduce((acc, denom) => ({ ...acc, [denom]: shift?.denoms?.[denom] ?? 0 }), {}),
+    otherCashAmount: shift?.otherCashAmount ?? 0,
+    otherCashReason: shift?.otherCashReason || ''
   };
 }
 
@@ -1180,6 +1249,8 @@ function addMovementToShift(shifts, date, shiftName, movement) {
     status: 'abierto',
     notes: '',
     denoms: {},
+    otherCashAmount: 0,
+    otherCashReason: '',
     movements: [],
     savedAt: new Date().toISOString()
   };
@@ -1207,8 +1278,12 @@ function fromCents(value) {
   return value / 100;
 }
 
-function cashLeft(denoms) {
-  return Object.entries(denoms || {}).reduce((sum, [denom, count]) => sum + cents(denom) * num(count), 0);
+function cashLeft(denoms, otherCashAmount = 0) {
+  return Object.entries(denoms || {}).reduce((sum, [denom, count]) => sum + cents(denom) * num(count), cents(otherCashAmount));
+}
+
+function shiftCashLeft(shift) {
+  return cashLeft(shift?.denoms, shift?.otherCashAmount);
 }
 
 function movementTotals(shift) {
@@ -1225,7 +1300,7 @@ function expectedLeft(shift) {
 }
 
 function shiftDiff(shift) {
-  return cashLeft(shift.denoms) - expectedLeft(shift);
+  return shiftCashLeft(shift) - expectedLeft(shift);
 }
 
 function dayShifts(shifts, date) {
@@ -1248,7 +1323,7 @@ function previousShift(shifts, date, shiftName) {
 }
 
 function autoOpeningCash(shifts, date, shiftName) {
-  return fromCents(cashLeft(previousShift(shifts, date, shiftName)?.denoms));
+  return fromCents(shiftCashLeft(previousShift(shifts, date, shiftName)));
 }
 
 function purchaseTotalForShift(compras, shiftName) {

@@ -57,8 +57,13 @@ export function resumirCompras(compras, fecha = fechaBogota()) {
 export async function sincronizarCompras(fecha = fechaBogota()) {
   const compras = await leerComprasPorFecha(fecha);
   const resumen = resumirCompras(compras, fecha);
+  const opciones = await leerOpcionesReporte();
 
-  await firestore.collection(comprasCollection).doc(fecha).set(resumen, { merge: true });
+  await firestore.collection(comprasCollection).doc(fecha).set({
+    ...resumen,
+    opciones,
+    opcionesActualizadoEn: new Date().toISOString()
+  }, { merge: true });
 
   return resumen;
 }
@@ -73,7 +78,7 @@ export async function leerOpcionesReporte() {
   const [journals] = await pool.execute(
     `SELECT DISTINCT jornada
      FROM tbl_consolidado_compras
-     WHERE jornada IS NOT NULL AND TRIM(jornada) <> ''
+     WHERE UPPER(TRIM(jornada)) IN ('DIURNA', 'NOCTURNA')
      ORDER BY jornada ASC`
   );
 

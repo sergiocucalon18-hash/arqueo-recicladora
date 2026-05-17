@@ -291,6 +291,21 @@ input[readonly] {
   color: #59665f;
 }
 
+.input-action {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+
+.input-ok {
+  min-width: 44px;
+  min-height: 40px;
+  border-radius: 8px;
+  background: var(--green);
+  color: #fff;
+  font-weight: 900;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -318,6 +333,9 @@ input[readonly] {
 }
 
 .denom b { color: var(--ink); }
+.denom-other {
+  grid-column: span 2;
+}
 
 .table-wrap {
   overflow-x: auto;
@@ -503,6 +521,7 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 680px) {
   main { padding: 16px; }
   .nav, .denoms { grid-template-columns: 1fr; }
+  .denom-other { grid-column: span 1; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid > * { grid-column: span 1 !important; }
   .title h2 { font-size: 24px; }

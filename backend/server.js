@@ -12,7 +12,7 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const syncIntervalSeconds = Number(process.env.SYNC_INTERVAL_SECONDS || 300);
+const syncIntervalSeconds = Number(process.env.SYNC_INTERVAL_SECONDS || 60);
 
 app.use(cors());
 app.use(express.json());
