@@ -6,15 +6,20 @@ import { auth, db } from './firebase';
 import './styles.css';
 
 const DATA_REF = doc(db, 'arqueos', 'almetales');
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 const SESSION_KEY = 'arqueo-recicladora-session';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const denominations = [100, 50, 20, 10, 5, 1, 0.25, 0.1, 0.05, 0.01];
 const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], updatedAt: '' };
+const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], actualizadoEn: '' };
 
 function App() {
   const [data, setData] = useState(defaultData);
+  const [comprasDiarias, setComprasDiarias] = useState(defaultCompras);
   const [loading, setLoading] = useState(true);
+  const [authReady, setAuthReady] = useState(false);
   const [syncError, setSyncError] = useState('');
+  const [comprasError, setComprasError] = useState('');
   const [session, setSession] = useState(() => readSession());
   const [activeView, setActiveView] = useState(session?.role === 'owner' ? 'owner' : 'employee');
   const [activeDate, setActiveDate] = useState(today());
@@ -29,6 +34,7 @@ function App() {
     async function start() {
       try {
         await signInAnonymously(auth);
+        setAuthReady(true);
       } catch (error) {
         setSyncError(`Autenticacion Firebase: ${error.message}`);
       }
@@ -60,11 +66,50 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!authReady || !activeDate) return undefined;
+    let active = true;
+    const comprasRef = doc(db, 'compras_diarias', activeDate);
+    const unsubscribe = onSnapshot(
+      comprasRef,
+      (snapshot) => {
+        if (!active) return;
+        setComprasDiarias(snapshot.exists() ? normalizeCompras(snapshot.data(), activeDate) : { ...defaultCompras, fecha: activeDate });
+        setComprasError('');
+      },
+      (error) => {
+        if (!active) return;
+
+        if (error.code === 'permission-denied') {
+          fetchComprasFromApi(activeDate)
+            .then((payload) => {
+              if (!active) return;
+              setComprasDiarias(normalizeCompras(payload, activeDate));
+              setComprasError('');
+            })
+            .catch((apiError) => {
+              if (!active) return;
+              setComprasError(`Firestore bloqueo la lectura de compras y la API local no respondio: ${apiError.message}`);
+            });
+          return;
+        }
+
+        setComprasError(error.message);
+      }
+    );
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [authReady, activeDate]);
+
   const ownerUnlocked = session?.role === 'owner';
   const dayItems = useMemo(() => dayShifts(data.shifts, activeDate), [data.shifts, activeDate]);
   const pageCopy = {
     employee: ['Registrar caja del turno', 'Registra ingresos, gastos y cierre de efectivo del turno.'],
     owner: ['Revision privada del dueno', 'Cuadres, diferencias, reportes y edicion completa.'],
+    reports: ['Reportes de compras', 'Consulta compras por material, jornada, dia completo o rangos de fecha y hora.'],
     settings: ['Configuracion', 'Claves, respaldo, importacion y limpieza de datos.']
   };
 
@@ -216,6 +261,7 @@ function App() {
         <nav className="nav" aria-label="Navegacion principal">
           <button className={activeView === 'employee' ? 'active' : ''} onClick={() => setActiveView('employee')}>Registrar turno</button>
           {ownerUnlocked && <button className={activeView === 'owner' ? 'active' : ''} onClick={() => setActiveView('owner')}>Revision dueno</button>}
+          {ownerUnlocked && <button className={activeView === 'reports' ? 'active' : ''} onClick={() => setActiveView('reports')}>Reportes</button>}
           {ownerUnlocked && <button className={activeView === 'settings' ? 'active' : ''} onClick={() => setActiveView('settings')}>Configuracion</button>}
         </nav>
 
@@ -233,6 +279,7 @@ function App() {
             <h2>{pageCopy[activeView][0]}</h2>
             <p>{pageCopy[activeView][1]}</p>
             <SyncStatus loading={loading} error={syncError} updatedAt={data.updatedAt} />
+            <ComprasSyncStatus compras={comprasDiarias} error={comprasError} />
           </div>
           <div className="toolbar">
             <input type="date" value={activeDate} onChange={(event) => setActiveDate(event.target.value)} aria-label="Fecha activa" />
@@ -244,8 +291,9 @@ function App() {
         {activeView === 'employee' && (
           <EmployeeView
             shifts={dayItems}
+            compras={comprasDiarias}
             deleteUnlocked={deleteUnlocked}
-            onOpenShift={() => setShiftModal(openShiftForm(data.shifts, activeDate, null, ownerUnlocked, session.name))}
+            onOpenShift={() => setShiftModal(openShiftForm(data.shifts, activeDate, null, ownerUnlocked, session.name, comprasDiarias))}
             onOpenMovement={(type) => setMovementModal(openMovementForm(data.shifts, activeDate, null, type, session.name))}
             onDeleteMovement={deleteMovement}
             onUnlockDelete={unlockEmployeeDelete}
@@ -256,11 +304,16 @@ function App() {
         {activeView === 'owner' && ownerUnlocked && (
           <OwnerView
             shifts={dayItems}
-            onOpenShift={(id) => setShiftModal(openShiftForm(data.shifts, activeDate, id, ownerUnlocked, session.name))}
+            compras={comprasDiarias}
+            onOpenShift={(id) => setShiftModal(openShiftForm(data.shifts, activeDate, id, ownerUnlocked, session.name, comprasDiarias))}
             onOpenMovement={(id) => setMovementModal(openMovementForm(data.shifts, activeDate, id, 'gasto', session.name))}
             onDeleteShift={deleteShift}
             onDeleteMovement={deleteMovement}
           />
+        )}
+
+        {activeView === 'reports' && ownerUnlocked && (
+          <ReportsView activeDate={activeDate} />
         )}
 
         {activeView === 'settings' && ownerUnlocked && (
@@ -273,6 +326,7 @@ function App() {
           form={shiftModal}
           ownerUnlocked={ownerUnlocked}
           shifts={data.shifts}
+          compras={comprasDiarias}
           onClose={() => setShiftModal(null)}
           onChange={setShiftModal}
           onSubmit={saveShift}
@@ -328,7 +382,7 @@ function Login({ data, loading, syncError, onLogin }) {
   );
 }
 
-function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
+function EmployeeView({ shifts, compras, deleteUnlocked, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
   const movements = shifts.flatMap((shift) => (shift.movements || []).map((movement) => ({ ...movement, shiftName: shift.shiftName, shiftId: shift.id })));
   const incomes = movements.filter((movement) => movement.type === 'ingreso');
   const expenses = movements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro');
@@ -343,6 +397,17 @@ function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onD
           <button className="primary" onClick={onOpenShift}>Cerrar turno</button>
         </div>
         <p>Registra cada ingreso o gasto cuando ocurre. Al final cuenta el efectivo que dejas para el siguiente turno.</p>
+      </div>
+      <div className="panel span-12 compras-panel">
+        <div className="section-title">
+          <h3>Compras sincronizadas</h3>
+          <span className="status info">{money.format(num(compras.totalDiario))}</span>
+        </div>
+        <div className="compras-summary">
+          <span>{compras.cantidadRegistros || 0} registros</span>
+          <span>{num(compras.totalPesoKg).toLocaleString('es-CO')} kg netos</span>
+          <span>Actualizado: {compras.actualizadoEn ? timeText(compras.actualizadoEn) : 'pendiente'}</span>
+        </div>
       </div>
       <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onDelete={onDeleteMovement} />
       <MovementBox title="Gastos registrados" total={expenseTotal} status="bad" movements={expenses} emptyText="No hay gastos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('gasto')} onDelete={onDeleteMovement} />
@@ -399,15 +464,15 @@ function MovementBox({ title, total, status, movements, emptyText, canDelete, on
   );
 }
 
-function OwnerView({ shifts, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
-  const purchases = shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
+function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
+  const purchases = compras.cantidadRegistros ? cents(compras.totalDiario) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
   const expenses = shifts.reduce((sum, shift) => sum + movementTotals(shift).gasto + movementTotals(shift).retiro, 0);
   const left = shifts.reduce((sum, shift) => sum + cashLeft(shift.denoms), 0);
   const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
 
   return (
     <section className="grid">
-      <Metric title="Compras reportadas" value={money.format(fromCents(purchases))} note="Sistema de pesaje" />
+      <Metric title="Compras reportadas" value={money.format(fromCents(purchases))} note={compras.cantidadRegistros ? `${compras.cantidadRegistros} registros sincronizados` : 'Sistema de pesaje'} />
       <Metric title="Gastos y retiros" value={money.format(fromCents(expenses))} note="Registrados por turno" />
       <Metric title="Efectivo dejado" value={money.format(fromCents(left))} note="Contado por denominaciones" />
       <Metric title="Diferencia neta" value={money.format(fromCents(diff))} note={shifts.length ? diffText(diff) : 'Sin cierres'} />
@@ -470,6 +535,179 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
   );
 }
 
+function ReportsView({ activeDate }) {
+  const [options, setOptions] = useState({ materiales: [], jornadas: [] });
+  const [filters, setFilters] = useState(() => defaultReportFilters(activeDate));
+  const [report, setReport] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setFilters((current) => current.desde || current.hasta ? current : defaultReportFilters(activeDate));
+  }, [activeDate]);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/compras-opciones`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('No se pudieron cargar materiales y jornadas.')))
+      .then(setOptions)
+      .catch((err) => setError(err.message));
+  }, []);
+
+  async function generateReport(event) {
+    event?.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams();
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value) params.set(key, value);
+      });
+      const response = await fetch(`${API_BASE_URL}/reporte-compras?${params.toString()}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'No se pudo generar el reporte.');
+      setReport(payload);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function updateFilter(field, value) {
+    setFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  function setFullDay() {
+    setFilters((current) => ({ ...current, desde: `${activeDate}T00:00`, hasta: `${activeDate}T23:59` }));
+  }
+
+  function clearFilters() {
+    setFilters(defaultReportFilters(activeDate));
+    setReport(null);
+    setError('');
+  }
+
+  return (
+    <section className="grid reports-view">
+      <div className="panel span-12">
+        <div className="section-title">
+          <h3>Filtros del reporte</h3>
+          <div className="toolbar">
+            <button type="button" className="secondary" onClick={setFullDay}>Dia completo</button>
+            <button type="button" className="secondary" onClick={clearFilters}>Limpiar</button>
+          </div>
+        </div>
+        <form className="form-grid" onSubmit={generateReport}>
+          <label className="span-field-3">Desde
+            <input type="datetime-local" value={filters.desde} onChange={(event) => updateFilter('desde', event.target.value)} required />
+          </label>
+          <label className="span-field-3">Hasta
+            <input type="datetime-local" value={filters.hasta} onChange={(event) => updateFilter('hasta', event.target.value)} required />
+          </label>
+          <label className="span-field-3">Material
+            <select value={filters.material} onChange={(event) => updateFilter('material', event.target.value)}>
+              <option value="">Todos los materiales</option>
+              {options.materiales.map((material) => <option key={material} value={material}>{material}</option>)}
+            </select>
+          </label>
+          <label className="span-field-3">Jornada
+            <select value={filters.jornada} onChange={(event) => updateFilter('jornada', event.target.value)}>
+              <option value="">Todas las jornadas</option>
+              {options.jornadas.map((jornada) => <option key={jornada} value={jornada}>{jornada}</option>)}
+            </select>
+          </label>
+          <div className="span-field-12 report-actions">
+            <button className="primary" disabled={loading}>{loading ? 'Generando...' : 'Generar reporte'}</button>
+            {report && <button type="button" className="secondary" onClick={() => exportReportCsv(report)}>Exportar CSV</button>}
+          </div>
+        </form>
+        {error && <p className="error report-error">{error}</p>}
+      </div>
+
+      {!report && <div className="panel span-12"><Empty text="Elige un rango y genera un reporte para ver totales por material y jornada." /></div>}
+
+      {report && (
+        <>
+          <Metric title="Total comprado" value={money.format(num(report.totalSubtotal))} note={`${report.cantidadRegistros} registros`} />
+          <Metric title="Peso neto" value={`${num(report.totalPesoKg).toLocaleString('es-CO')} kg`} note="Suma del rango" />
+          <Metric title="Materiales" value={Object.keys(report.porMaterial || {}).length} note="Con compras en el rango" />
+          <Metric title="Generado" value={timeText(report.generadoEn)} note={`${dateText(report.filtros.desde)} a ${dateText(report.filtros.hasta)}`} />
+
+          <div className="panel span-6">
+            <div className="section-title"><h3>Por material y jornada</h3></div>
+            <ReportSummaryTable rows={Object.values(report.porMaterialJornada || {})} columns={['material', 'jornada']} />
+          </div>
+
+          <div className="panel span-6">
+            <div className="section-title"><h3>Por material</h3></div>
+            <ReportSummaryTable rows={Object.values(report.porMaterial || {})} columns={['nombre']} />
+          </div>
+
+          <div className="panel span-12">
+            <div className="section-title">
+              <h3>Detalle de compras</h3>
+              <span className="status info">{report.compras.length} registros</span>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Fecha</th><th>Hora</th><th>Material</th><th>Jornada</th><th>Peso kg</th><th>Subtotal</th></tr>
+                </thead>
+                <tbody>
+                  {report.compras.map((compra) => (
+                    <tr key={compra.id}>
+                      <td>{compra.fecha}</td>
+                      <td>{compra.hora_registro_salida}</td>
+                      <td>{compra.material}</td>
+                      <td>{compra.jornada || '-'}</td>
+                      <td>{num(compra.peso_neto_kg).toLocaleString('es-CO')}</td>
+                      <td>{money.format(num(compra.subtotal))}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ReportSummaryTable({ rows, columns }) {
+  if (!rows.length) return <Empty text="No hay compras para estos filtros." />;
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {columns.includes('material') && <th>Material</th>}
+            {columns.includes('jornada') && <th>Jornada</th>}
+            {columns.includes('nombre') && <th>Nombre</th>}
+            <th>Peso kg</th>
+            <th>Subtotal</th>
+            <th>Registros</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows
+            .sort((a, b) => num(b.totalSubtotal) - num(a.totalSubtotal))
+            .map((row) => (
+              <tr key={`${row.material || row.nombre}-${row.jornada || ''}`}>
+                {columns.includes('material') && <td>{row.material}</td>}
+                {columns.includes('jornada') && <td>{row.jornada}</td>}
+                {columns.includes('nombre') && <td>{row.nombre}</td>}
+                <td>{num(row.totalPesoKg).toLocaleString('es-CO')}</td>
+                <td>{money.format(num(row.totalSubtotal))}</td>
+                <td>{row.cantidadRegistros}</td>
+              </tr>
+            ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function SettingsView({ data, onSave, onImport, onClear }) {
   const [ownerPin, setOwnerPin] = useState(data.ownerPin);
   const [employeePin, setEmployeePin] = useState(data.employeePin);
@@ -500,13 +738,17 @@ function SettingsView({ data, onSave, onImport, onClear }) {
   );
 }
 
-function ShiftModal({ form, ownerUnlocked, shifts, onClose, onChange, onSubmit }) {
+function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, onSubmit }) {
   const automatic = autoOpeningCash(shifts, form.date, form.shiftName);
+  const syncedPurchases = purchaseTotalForShift(compras, form.shiftName);
   const denomTotal = money.format(fromCents(cashLeft(form.denoms)));
 
   useEffect(() => {
-    if (!ownerUnlocked || !form.id) onChange({ ...form, openingCash: automatic });
-  }, [form.date, form.shiftName]);
+    const next = { ...form };
+    if (!ownerUnlocked || !form.id) next.openingCash = automatic;
+    if (!form.id && syncedPurchases > 0) next.purchaseTotal = syncedPurchases;
+    if (next.openingCash !== form.openingCash || next.purchaseTotal !== form.purchaseTotal) onChange(next);
+  }, [form.date, form.shiftName, syncedPurchases]);
 
   function setField(field, value) {
     onChange({ ...form, [field]: value });
@@ -524,7 +766,7 @@ function ShiftModal({ form, ownerUnlocked, shifts, onClose, onChange, onSubmit }
           <label className="span-field-3">Turno<select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required><option>Turno dia</option><option>Turno noche</option></select></label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" min="0" step="0.01" value={form.openingCash} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
-          <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /></label>
+          <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>
           <label className="span-field-4">Estado del turno<select value={form.status} onChange={(event) => setField('status', event.target.value)}><option value="abierto">Abierto</option><option value="cerrado">Cerrado</option></select></label>
           <label className="span-field-4">Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
@@ -595,6 +837,41 @@ function SyncStatus({ loading, error, updatedAt }) {
   return <span className="sync ok-text">Sincronizado en tiempo real{updatedAt ? ` - ${timeText(updatedAt)}` : ''}</span>;
 }
 
+function ComprasSyncStatus({ compras, error }) {
+  if (error) return <span className="sync error">Compras MySQL sin sincronizar: {error}</span>;
+  if (!compras.actualizadoEn) return <span className="sync">Compras MySQL pendientes para esta fecha.</span>;
+  return <span className="sync ok-text">Compras MySQL: {money.format(num(compras.totalDiario))}</span>;
+}
+
+function defaultReportFilters(date = today()) {
+  return {
+    desde: `${date}T00:00`,
+    hasta: `${date}T23:59`,
+    material: '',
+    jornada: ''
+  };
+}
+
+function exportReportCsv(report) {
+  const headers = ['fecha', 'hora_registro_salida', 'material', 'jornada', 'peso_neto_kg', 'subtotal'];
+  const lines = [
+    headers.join(','),
+    ...report.compras.map((compra) => headers.map((key) => csvValue(compra[key])).join(','))
+  ];
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `reporte-compras-${report.filtros.desde.slice(0, 10)}-${report.filtros.hasta.slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvValue(value) {
+  const text = String(value ?? '');
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
 function readSession() {
   try {
     return JSON.parse(localStorage.getItem(SESSION_KEY));
@@ -613,17 +890,50 @@ function normalizeData(value) {
   };
 }
 
-function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName) {
+function normalizeCompras(value, fecha) {
+  return {
+    ...defaultCompras,
+    ...value,
+    fecha: value?.fecha || fecha,
+    totalDiario: num(value?.totalDiario),
+    totalPesoKg: num(value?.totalPesoKg),
+    cantidadRegistros: Number(value?.cantidadRegistros || 0),
+    porJornada: value?.porJornada || {},
+    compras: Array.isArray(value?.compras) ? value.compras : []
+  };
+}
+
+async function fetchComprasFromApi(fecha) {
+  const response = await fetch(`${API_BASE_URL}/compras?fecha=${encodeURIComponent(fecha)}`);
+  const payload = await readJson(response);
+
+  if (!response.ok) {
+    throw new Error(payload?.error || 'No se pudieron cargar compras desde la API local.');
+  }
+
+  return payload;
+}
+
+async function readJson(response) {
+  try {
+    return await response.json();
+  } catch (_error) {
+    return null;
+  }
+}
+
+function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, compras = defaultCompras) {
   const shift = shifts.find((item) => item.id === id);
   const date = shift?.date || activeDate;
   const shiftName = shift?.shiftName || 'Turno dia';
+  const syncedPurchases = purchaseTotalForShift(compras, shiftName);
   return {
     id: shift?.id || '',
     date,
     shiftName,
     employeeName: shift?.employeeName || fallbackName || '',
     openingCash: shift?.openingCash ?? autoOpeningCash(shifts, date, shiftName),
-    purchaseTotal: shift?.purchaseTotal ?? 0,
+    purchaseTotal: shift?.purchaseTotal ?? syncedPurchases,
     status: shift?.status || 'cerrado',
     notes: shift?.notes || '',
     denoms: denominations.reduce((acc, denom) => ({ ...acc, [denom]: shift?.denoms?.[denom] ?? 0 }), {})
@@ -726,6 +1036,38 @@ function autoOpeningCash(shifts, date, shiftName) {
   return fromCents(cashLeft(previousShift(shifts, date, shiftName)?.denoms));
 }
 
+function purchaseTotalForShift(compras, shiftName) {
+  const entries = Object.values(compras?.porJornada || {});
+  const matched = entries.filter((entry) => jornadaMatchesShift(entry.jornada, shiftName));
+
+  if (matched.length) {
+    return matched.reduce((sum, entry) => sum + num(entry.totalSubtotal), 0);
+  }
+
+  if (entries.length === 1) return num(entries[0].totalSubtotal);
+
+  return 0;
+}
+
+function jornadaMatchesShift(jornada, shiftName) {
+  const value = normalizeText(jornada);
+  const shift = normalizeText(shiftName);
+
+  if (!value) return false;
+  if (shift.includes('noche')) return value.includes('noche') || value.includes('nocturna') || value === '2';
+  if (shift.includes('dia')) return value.includes('dia') || value.includes('diurna') || value.includes('manana') || value === '1';
+
+  return value === shift;
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
 function upsert(list, item) {
   const exists = list.some((entry) => entry.id === item.id);
   return exists ? list.map((entry) => entry.id === item.id ? item : entry) : [item, ...list];
@@ -744,6 +1086,11 @@ function diffText(diff) {
 function timeText(value) {
   if (!value) return '';
   return new Date(value).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+}
+
+function dateText(value) {
+  if (!value) return '';
+  return String(value).replace('T', ' ').slice(0, 16);
 }
 
 createRoot(document.getElementById('root')).render(<App />);
