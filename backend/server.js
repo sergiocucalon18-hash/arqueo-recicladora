@@ -114,18 +114,42 @@ const server = app.listen(port, () => {
   console.log(`API REST escuchando en http://localhost:${port}`);
   console.log(`Endpoint principal: http://localhost:${port}/compras-hoy`);
 
-  sincronizarComprasRecientes(syncBackfillDays).catch((error) => {
-    console.error('No se pudo hacer la sincronizacion inicial de dias recientes:', errorMessage(error));
-  });
+  sincronizarComprasRecientes(syncBackfillDays)
+    .then((resultados) => logSyncSuccess('Sincronizacion inicial', resultados))
+    .catch((error) => {
+      console.error('No se pudo hacer la sincronizacion inicial de dias recientes:', errorMessage(error));
+    });
 
   if (syncIntervalSeconds > 0) {
     setInterval(() => {
-      sincronizarComprasRecientes(syncIntervalBackfillDays).catch((error) => {
-        console.error('No se pudo sincronizar compras:', errorMessage(error));
-      });
+      sincronizarComprasRecientes(syncIntervalBackfillDays)
+        .then((resultados) => logSyncSuccess('Sincronizacion periodica', resultados))
+        .catch((error) => {
+          console.error('No se pudo sincronizar compras:', errorMessage(error));
+        });
     }, syncIntervalSeconds * 1000);
   }
 });
+
+function logSyncSuccess(label, resultados = []) {
+  const lista = Array.isArray(resultados) ? resultados : [resultados];
+  const last = lista.filter(Boolean).at(-1);
+  const latestTime = latestPurchaseTime(last?.compras || []);
+  const stamp = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+  const detail = last
+    ? `${lista.length} dia(s), ${last.fecha}, ${last.cantidadRegistros} compras${latestTime ? `, ultima ${latestTime}` : ''}`
+    : 'sin compras en el rango';
+
+  console.log(`[${stamp}] ${label}: ${detail}.`);
+}
+
+function latestPurchaseTime(compras = []) {
+  return compras
+    .map((compra) => compra.hora_registro_salida)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || '';
+}
 
 server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {

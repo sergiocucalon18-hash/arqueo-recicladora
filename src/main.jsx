@@ -115,6 +115,12 @@ function App() {
     }
   }, [activeCashBox?.date, activeDate, session?.role]);
 
+  useEffect(() => {
+    if (!activeCashBox) return;
+    const currentShift = findShift(data.shifts, activeCashBox.date, activeCashBox.shiftName);
+    if (currentShift?.status === 'cerrado') clearActiveCashBox();
+  }, [data.shifts, activeCashBox?.date, activeCashBox?.shiftName]);
+
   const ownerUnlocked = session?.role === 'owner';
   const dayItems = useMemo(() => dayShifts(data.shifts, activeDate), [data.shifts, activeDate]);
   const employeeShift = activeCashBox ? findShift(data.shifts, activeCashBox.date, activeCashBox.shiftName) : null;
@@ -163,7 +169,8 @@ function App() {
     const shiftName = form.shiftName;
     const existing = findShift(data.shifts, date, shiftName);
 
-    if (existing?.status === 'cerrado' && !confirm('Este turno ya tiene un cierre guardado. Deseas abrirlo para agregar o revisar movimientos?')) {
+    if (existing?.status === 'cerrado') {
+      alert('Ese turno ya esta cerrado. Para revisarlo o corregirlo entra en Revision dueno.');
       return;
     }
 
@@ -208,10 +215,9 @@ function App() {
     };
     await persist({ ...data, shifts: upsert(data.shifts, shift) });
     setShiftModal(null);
-    if (!ownerUnlocked && activeCashBox?.date === form.date && activeCashBox?.shiftName === form.shiftName) {
+    if (activeCashBox?.date === form.date && activeCashBox?.shiftName === form.shiftName) {
       clearActiveCashBox();
     }
-    alert('Cierre guardado.');
   }
 
   async function saveMovement(form) {
@@ -230,7 +236,6 @@ function App() {
     const nextShifts = addMovementToShift(cleaned, form.date, form.shiftName, movement);
     await persist({ ...data, shifts: nextShifts });
     setMovementModal(null);
-    alert('Movimiento guardado.');
   }
 
   async function deleteShift(id) {
