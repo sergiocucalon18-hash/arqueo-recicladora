@@ -6,7 +6,7 @@ set "TASK_NAME=Arqueo Recicladora - Sincronizar compras"
 set "TASK_SCRIPT=%~dp0iniciar_sincronizacion_mysql.bat"
 
 echo Instalando inicio automatico de sincronizacion...
-schtasks /Create /TN "%TASK_NAME%" /SC ONLOGON /RL LIMITED /F /TR "%TASK_SCRIPT%"
+schtasks /Create /TN "%TASK_NAME%" /SC ONLOGON /RL LIMITED /F /TR "\"%TASK_SCRIPT%\""
 if errorlevel 1 (
   echo.
   echo No se pudo crear la tarea automatica.
