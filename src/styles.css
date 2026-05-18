@@ -292,6 +292,17 @@ input, select, textarea {
   min-height: 40px;
 }
 
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 input[readonly] {
   background: #f2f6f3;
   color: #59665f;
@@ -341,6 +352,30 @@ input[readonly] {
 .denom b { color: var(--ink); }
 .denom-other {
   grid-column: span 2;
+}
+
+.cash-open-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.cash-open-summary div {
+  display: grid;
+  gap: 4px;
+}
+
+.cash-open-summary span,
+.cash-open-summary small {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.cash-open-summary strong {
+  color: var(--green);
+  font-size: clamp(24px, 4vw, 38px);
+  line-height: 1;
 }
 
 .table-wrap {
@@ -528,6 +563,7 @@ tr:last-child td { border-bottom: 0; }
   main { padding: 16px; }
   .nav, .denoms { grid-template-columns: 1fr; }
   .denom-other { grid-column: span 1; }
+  .cash-open-summary { align-items: stretch; flex-direction: column; }
   .form-grid { grid-template-columns: 1fr; }
   .form-grid > * { grid-column: span 1 !important; }
   .title h2 { font-size: 24px; }

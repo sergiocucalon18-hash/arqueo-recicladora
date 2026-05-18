@@ -188,6 +188,31 @@ function App() {
     localStorage.setItem(ACTIVE_CASH_BOX_KEY, JSON.stringify(nextCashBox));
   }
 
+  async function updateOpeningCash(form) {
+    if (form.ownerPin !== data.ownerPin) {
+      alert('Clave de dueno incorrecta.');
+      return;
+    }
+
+    const openingCashText = String(form.openingCash ?? '').trim().replace(',', '.');
+    const openingCash = Number(openingCashText);
+
+    if (!openingCashText || Number.isNaN(openingCash) || openingCash < 0) {
+      alert('Ingresa un saldo inicial valido.');
+      return;
+    }
+
+    const existing = findShift(data.shifts, form.date, form.shiftName);
+    const base = existing || createOpenShift(data.shifts, form.date, form.shiftName, session?.name, comprasDiarias);
+    const nextShift = {
+      ...base,
+      openingCash,
+      savedAt: new Date().toISOString()
+    };
+
+    await persist({ ...data, shifts: upsert(data.shifts, nextShift) });
+  }
+
   function clearActiveCashBox() {
     localStorage.removeItem(ACTIVE_CASH_BOX_KEY);
     setActiveCashBox(null);
@@ -203,11 +228,11 @@ function App() {
       date: form.date,
       shiftName: form.shiftName,
       employeeName: form.employeeName.trim(),
-      openingCash: ownerUnlocked ? num(form.openingCash) : autoOpeningCash(data.shifts, form.date, form.shiftName),
+      openingCash: ownerUnlocked ? num(form.openingCash) : num(existing?.openingCash ?? form.openingCash ?? autoOpeningCash(data.shifts, form.date, form.shiftName)),
       purchaseTotal: num(form.purchaseTotal),
       status: 'cerrado',
       notes: form.notes.trim(),
-      denoms: form.denoms,
+      denoms: normalizeDenoms(form.denoms),
       otherCashAmount: num(form.otherCashAmount),
       otherCashReason: String(form.otherCashReason || '').trim(),
       movements: existing?.movements || [],
@@ -349,6 +374,7 @@ function App() {
             activeCashBox={activeCashBox}
             deleteUnlocked={deleteUnlocked}
             onOpenCashBox={openCashBox}
+            onUpdateOpeningCash={updateOpeningCash}
             onOpenShift={() => {
               if (!activeCashBox) {
                 alert('Primero abre una caja para DIURNA o NOCTURNA.');
@@ -454,12 +480,30 @@ function Login({ data, loading, syncError, onLogin }) {
   );
 }
 
-function EmployeeView({ shifts, activeCashBox, deleteUnlocked, onOpenCashBox, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
+function EmployeeView({ shifts, activeCashBox, deleteUnlocked, onOpenCashBox, onUpdateOpeningCash, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
+  const currentShift = shifts[0] || null;
   const movements = shifts.flatMap((shift) => (shift.movements || []).map((movement) => ({ ...movement, shiftName: shift.shiftName, shiftId: shift.id })));
   const incomes = movements.filter((movement) => movement.type === 'ingreso');
   const expenses = movements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro');
   const incomeTotal = incomes.reduce((sum, movement) => sum + cents(movement.amount), 0);
   const expenseTotal = expenses.reduce((sum, movement) => sum + cents(movement.amount), 0);
+
+  function requestOpeningCashUpdate() {
+    if (!activeCashBox) return;
+
+    const ownerPin = prompt('Clave del dueno para corregir el saldo inicial:');
+    if (ownerPin === null) return;
+
+    const openingCash = prompt('Nuevo saldo inicial recibido:', currentShift?.openingCash ? String(currentShift.openingCash) : '');
+    if (openingCash === null) return;
+
+    onUpdateOpeningCash({
+      date: activeCashBox.date,
+      shiftName: activeCashBox.shiftName,
+      openingCash,
+      ownerPin
+    });
+  }
 
   return (
     <section className="grid">
@@ -469,7 +513,14 @@ function EmployeeView({ shifts, activeCashBox, deleteUnlocked, onOpenCashBox, on
           {activeCashBox && <button className="primary" onClick={onOpenShift}>Cerrar caja</button>}
         </div>
         {!activeCashBox ? <CashBoxStarter onOpen={onOpenCashBox} /> : (
-          <p>Fecha {activeCashBox.date}. Los ingresos y gastos que registres se guardan solo en esta jornada. Al cerrar caja dejan de mostrarse al siguiente turno.</p>
+          <div className="cash-open-summary">
+            <div>
+              <span>Saldo inicial recibido</span>
+              <strong>{money.format(num(currentShift?.openingCash))}</strong>
+              <small>Fecha {activeCashBox.date}. Viene del efectivo dejado por el turno anterior.</small>
+            </div>
+            <button className="secondary" type="button" onClick={requestOpeningCashUpdate}>Corregir con clave</button>
+          </div>
         )}
       </div>
       {activeCashBox && (
@@ -598,7 +649,7 @@ function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onS
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Turno</th><th>Empleado</th><th>Ingresos</th><th>Gastos</th><th>Retiros</th><th>Compras</th><th>Esperado</th><th>Dejado</th><th>Diferencia</th><th>Accion</th></tr>
+                <tr><th>Turno</th><th>Empleado</th><th>Inicial</th><th>Ingresos</th><th>Gastos</th><th>Retiros</th><th>Compras</th><th>Esperado</th><th>Dejado</th><th>Diferencia</th><th>Accion</th></tr>
               </thead>
               <tbody>
                 {shifts.map((shift) => <OwnerShiftRows key={shift.id} shift={shift} onOpenShift={onOpenShift} onOpenMovement={onOpenMovement} onDeleteShift={onDeleteShift} onDeleteMovement={onDeleteMovement} />)}
@@ -621,6 +672,7 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
       <tr>
         <td>{shift.shiftName}</td>
         <td>{shift.employeeName || '-'}</td>
+        <td>{money.format(num(shift.openingCash))}</td>
         <td>{money.format(fromCents(totals.ingreso))}</td>
         <td>{money.format(fromCents(totals.gasto))}</td>
         <td>{money.format(fromCents(totals.retiro))}</td>
@@ -630,11 +682,11 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
         <td><span className={`status ${diffClass(diff)}`}>{diffText(diff)} {money.format(Math.abs(fromCents(diff)))}</span></td>
         <td><RowActions onEdit={() => onOpenShift(shift.id)} onDelete={() => onDeleteShift(shift.id)} /></td>
       </tr>
-      {(shift.movements || []).length === 0 && <tr><td colSpan="10" className="muted">Sin movimientos registrados durante el turno.</td></tr>}
+      {(shift.movements || []).length === 0 && <tr><td colSpan="11" className="muted">Sin movimientos registrados durante el turno.</td></tr>}
       {(shift.movements || []).map((movement) => (
         <tr key={movement.id} className="subrow">
           <td colSpan="3">{timeText(movement.savedAt)}</td>
-          <td colSpan="4"><span className={`status mini ${movement.type === 'ingreso' ? 'ok' : movement.type === 'retiro' ? 'warn' : 'bad'}`}>{movement.type}</span> {movement.reason}</td>
+          <td colSpan="5"><span className={`status mini ${movement.type === 'ingreso' ? 'ok' : movement.type === 'retiro' ? 'warn' : 'bad'}`}>{movement.type}</span> {movement.reason}</td>
           <td>{money.format(num(movement.amount))}</td>
           <td>{movement.employeeName || '-'}</td>
           <td><RowActions onEdit={() => onOpenMovement(movement.id)} onDelete={() => onDeleteMovement(shift.id, movement.id)} /></td>
@@ -643,13 +695,13 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
       {num(shift.otherCashAmount) > 0 && (
         <tr className="subrow">
           <td colSpan="3">Otros efectivo</td>
-          <td colSpan="4">{shift.otherCashReason || 'Sin detalle'}</td>
+          <td colSpan="5">{shift.otherCashReason || 'Sin detalle'}</td>
           <td>{money.format(num(shift.otherCashAmount))}</td>
           <td>{shift.employeeName || '-'}</td>
           <td></td>
         </tr>
       )}
-      {shift.notes && <tr><td colSpan="10" className="muted">Notas: {shift.notes}</td></tr>}
+      {shift.notes && <tr><td colSpan="11" className="muted">Notas: {shift.notes}</td></tr>}
     </>
   );
 }
@@ -1140,7 +1192,7 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
 
   useEffect(() => {
     const next = { ...form };
-    if (!ownerUnlocked || !form.id) next.openingCash = automatic;
+    if (!form.id) next.openingCash = automatic;
     if (!form.id && syncedPurchases > 0) next.purchaseTotal = syncedPurchases;
     if (next.openingCash !== form.openingCash || next.purchaseTotal !== form.purchaseTotal) onChange(next);
   }, [form.date, form.shiftName, syncedPurchases]);
@@ -1166,8 +1218,8 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
             )}
           </label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
-          <label className="span-field-3">Saldo inicial recibido<input type="number" min="0" step="0.01" value={form.openingCash} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
-          {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
+          <label className="span-field-3">Saldo inicial recibido<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.openingCash)} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
+          {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.purchaseTotal)} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<input value="Cierre de caja" readOnly /></label>
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
@@ -1178,11 +1230,11 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
         <div className="denoms">
           {denominations.map((denom) => (
             <label className="denom" key={denom}><b>{money.format(denom)}</b>
-              <input type="number" min="0" step="1" value={form.denoms[denom] ?? 0} onChange={(event) => onChange({ ...form, denoms: { ...form.denoms, [denom]: num(event.target.value) } })} />
+              <input type="number" inputMode="numeric" min="0" step="1" value={numberInputValue(form.denoms[denom])} onChange={(event) => onChange({ ...form, denoms: { ...form.denoms, [denom]: event.target.value } })} />
             </label>
           ))}
           <label className="denom denom-other"><b>Otros</b>
-            <input type="number" min="0" step="0.01" value={form.otherCashAmount ?? 0} onChange={(event) => setField('otherCashAmount', event.target.value)} />
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.otherCashAmount)} onChange={(event) => setField('otherCashAmount', event.target.value)} />
             <input value={form.otherCashReason} onChange={(event) => setField('otherCashReason', event.target.value)} placeholder="Motivo o detalle" />
           </label>
         </div>
@@ -1217,7 +1269,7 @@ function MovementModal({ form, onClose, onChange, onSubmit }) {
             )}
           </label>
           <label className="span-field-3">Tipo<select value={form.type} onChange={(event) => setField('type', event.target.value)} required><option value="ingreso">Ingreso</option><option value="gasto">Gasto</option><option value="retiro">Retiro / entrega al dueno</option></select></label>
-          <label className="span-field-3">Monto<input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setField('amount', event.target.value)} required /></label>
+          <label className="span-field-3">Monto<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.amount)} onChange={(event) => setField('amount', event.target.value)} required /></label>
           <label className="span-field-4">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-8">Motivo<input value={form.reason} onChange={(event) => setField('reason', event.target.value)} placeholder="Ej: almuerzos, transporte, venta, ajuste" required /></label>
         </div>
@@ -1362,7 +1414,11 @@ function createOpenShift(shifts, date, shiftName, employeeName, compras = defaul
 }
 
 function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, compras = defaultCompras, forcedShiftName = '') {
-  const shift = shifts.find((item) => item.id === id);
+  const shift = id
+    ? shifts.find((item) => item.id === id)
+    : forcedShiftName
+      ? findShift(shifts, activeDate, forcedShiftName)
+      : null;
   const date = shift?.date || activeDate;
   const shiftName = shift?.shiftName || forcedShiftName || 'Turno dia';
   const syncedPurchases = purchaseTotalForShift(compras, shiftName);
@@ -1376,8 +1432,8 @@ function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, comp
     purchaseTotal: shift?.purchaseTotal ?? syncedPurchases,
     status: 'cerrado',
     notes: shift?.notes || '',
-    denoms: denominations.reduce((acc, denom) => ({ ...acc, [denom]: shift?.denoms?.[denom] ?? 0 }), {}),
-    otherCashAmount: shift?.otherCashAmount ?? 0,
+    denoms: denominations.reduce((acc, denom) => ({ ...acc, [denom]: shift?.denoms?.[denom] ?? '' }), {}),
+    otherCashAmount: shift?.otherCashAmount ?? '',
     otherCashReason: shift?.otherCashReason || ''
   };
 }
@@ -1390,7 +1446,7 @@ function openMovementForm(shifts, activeDate, id, movementType, fallbackName, fo
     shiftName: movement?.shiftName || forcedShiftName || 'Turno dia',
     lockShift,
     type: movement?.type || movementType || 'gasto',
-    amount: movement?.amount ?? 0,
+    amount: movement?.amount ?? '',
     employeeName: movement?.employeeName || fallbackName || '',
     reason: movement?.reason || ''
   };
@@ -1432,6 +1488,19 @@ function uid() {
 
 function num(value) {
   return Number(value || 0);
+}
+
+function numberInputValue(value) {
+  if (value === 0 || value === '0' || value === null || value === undefined) return '';
+  return value;
+}
+
+function normalizeDenoms(denoms = {}) {
+  return denominations.reduce((acc, denom) => {
+    const value = num(denoms[denom]);
+    if (value > 0) acc[denom] = value;
+    return acc;
+  }, {});
 }
 
 function cents(value) {
