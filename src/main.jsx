@@ -8,11 +8,13 @@ import './styles.css';
 const DATA_REF = doc(db, 'arqueos', 'almetales');
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000';
 const SESSION_KEY = 'arqueo-recicladora-session';
+const ACTIVE_CASH_BOX_KEY = 'almetales-active-cash-box';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const denominations = [20, 10, 5, 1, 0.5, 0.25, 0.1, 0.05];
 const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], updatedAt: '' };
 const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], opciones: null, actualizadoEn: '' };
 const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
+const shiftOptions = ['Turno dia', 'Turno noche'];
 
 function App() {
   const [data, setData] = useState(defaultData);
@@ -24,6 +26,8 @@ function App() {
   const [session, setSession] = useState(() => readSession());
   const [activeView, setActiveView] = useState(session?.role === 'owner' ? 'owner' : 'employee');
   const [activeDate, setActiveDate] = useState(today());
+  const [activeCashBox, setActiveCashBox] = useState(() => readActiveCashBox());
+  const [ownerShiftFilter, setOwnerShiftFilter] = useState('');
   const [deleteUnlocked, setDeleteUnlocked] = useState(false);
   const [shiftModal, setShiftModal] = useState(null);
   const [movementModal, setMovementModal] = useState(null);
@@ -105,8 +109,20 @@ function App() {
     };
   }, [authReady, activeDate]);
 
+  useEffect(() => {
+    if (session?.role !== 'owner' && activeCashBox?.date && activeDate !== activeCashBox.date) {
+      setActiveDate(activeCashBox.date);
+    }
+  }, [activeCashBox?.date, activeDate, session?.role]);
+
   const ownerUnlocked = session?.role === 'owner';
   const dayItems = useMemo(() => dayShifts(data.shifts, activeDate), [data.shifts, activeDate]);
+  const employeeShift = activeCashBox ? findShift(data.shifts, activeCashBox.date, activeCashBox.shiftName) : null;
+  const employeeItems = activeCashBox ? [employeeShift].filter(Boolean) : [];
+  const ownerItems = useMemo(
+    () => dayItems.filter((shift) => !ownerShiftFilter || shift.shiftName === ownerShiftFilter),
+    [dayItems, ownerShiftFilter]
+  );
   const pageCopy = {
     employee: ['Registrar caja del turno', 'Registra ingresos, gastos y cierre de efectivo del turno.'],
     owner: ['Revision privada del dueno', 'Cuadres, diferencias, reportes y edicion completa.'],
@@ -142,6 +158,34 @@ function App() {
     setActiveView('employee');
   }
 
+  async function openCashBox(form) {
+    const date = form.date || today();
+    const shiftName = form.shiftName;
+    const existing = findShift(data.shifts, date, shiftName);
+
+    if (existing?.status === 'cerrado' && !confirm('Este turno ya tiene un cierre guardado. Deseas abrirlo para agregar o revisar movimientos?')) {
+      return;
+    }
+
+    const nextCashBox = { date, shiftName };
+    let nextShifts = data.shifts;
+
+    if (!existing) {
+      const shift = createOpenShift(data.shifts, date, shiftName, session?.name, comprasDiarias);
+      nextShifts = upsert(data.shifts, shift);
+      await persist({ ...data, shifts: nextShifts });
+    }
+
+    setActiveDate(date);
+    setActiveCashBox(nextCashBox);
+    localStorage.setItem(ACTIVE_CASH_BOX_KEY, JSON.stringify(nextCashBox));
+  }
+
+  function clearActiveCashBox() {
+    localStorage.removeItem(ACTIVE_CASH_BOX_KEY);
+    setActiveCashBox(null);
+  }
+
   async function saveShift(form) {
     const existing = form.id
       ? data.shifts.find((entry) => entry.id === form.id)
@@ -164,6 +208,9 @@ function App() {
     };
     await persist({ ...data, shifts: upsert(data.shifts, shift) });
     setShiftModal(null);
+    if (!ownerUnlocked && activeCashBox?.date === form.date && activeCashBox?.shiftName === form.shiftName) {
+      clearActiveCashBox();
+    }
     alert('Cierre guardado.');
   }
 
@@ -293,10 +340,24 @@ function App() {
 
         {activeView === 'employee' && (
           <EmployeeView
-            shifts={dayItems}
+            shifts={employeeItems}
+            activeCashBox={activeCashBox}
             deleteUnlocked={deleteUnlocked}
-            onOpenShift={() => setShiftModal(openShiftForm(data.shifts, activeDate, null, ownerUnlocked, session.name, comprasDiarias))}
-            onOpenMovement={(type) => setMovementModal(openMovementForm(data.shifts, activeDate, null, type, session.name))}
+            onOpenCashBox={openCashBox}
+            onOpenShift={() => {
+              if (!activeCashBox) {
+                alert('Primero abre una caja para DIURNA o NOCTURNA.');
+                return;
+              }
+              setShiftModal(openShiftForm(data.shifts, activeCashBox.date, null, ownerUnlocked, session.name, comprasDiarias, activeCashBox.shiftName));
+            }}
+            onOpenMovement={(type) => {
+              if (!activeCashBox) {
+                alert('Primero abre una caja para DIURNA o NOCTURNA.');
+                return;
+              }
+              setMovementModal(openMovementForm(data.shifts, activeCashBox.date, null, type, session.name, activeCashBox.shiftName, true));
+            }}
             onDeleteMovement={deleteMovement}
             onUnlockDelete={unlockEmployeeDelete}
             onLockDelete={() => setDeleteUnlocked(false)}
@@ -305,8 +366,12 @@ function App() {
 
         {activeView === 'owner' && ownerUnlocked && (
           <OwnerView
-            shifts={dayItems}
+            shifts={ownerItems}
             compras={comprasDiarias}
+            activeDate={activeDate}
+            shiftFilter={ownerShiftFilter}
+            onDateChange={setActiveDate}
+            onShiftFilterChange={setOwnerShiftFilter}
             onOpenShift={(id) => setShiftModal(openShiftForm(data.shifts, activeDate, id, ownerUnlocked, session.name, comprasDiarias))}
             onOpenMovement={(id) => setMovementModal(openMovementForm(data.shifts, activeDate, id, 'gasto', session.name))}
             onDeleteShift={deleteShift}
@@ -384,7 +449,7 @@ function Login({ data, loading, syncError, onLogin }) {
   );
 }
 
-function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
+function EmployeeView({ shifts, activeCashBox, deleteUnlocked, onOpenCashBox, onOpenShift, onOpenMovement, onDeleteMovement, onUnlockDelete, onLockDelete }) {
   const movements = shifts.flatMap((shift) => (shift.movements || []).map((movement) => ({ ...movement, shiftName: shift.shiftName, shiftId: shift.id })));
   const incomes = movements.filter((movement) => movement.type === 'ingreso');
   const expenses = movements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro');
@@ -395,13 +460,19 @@ function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onD
     <section className="grid">
       <div className="panel span-12 intro-panel">
         <div className="section-title">
-          <h3>Turno en curso</h3>
-          <button className="primary" onClick={onOpenShift}>Cerrar turno</button>
+          <h3>{activeCashBox ? `Caja abierta: ${shiftShortName(activeCashBox.shiftName)}` : 'Abrir caja'}</h3>
+          {activeCashBox && <button className="primary" onClick={onOpenShift}>Cerrar caja</button>}
         </div>
-        <p>Registra cada ingreso o gasto cuando ocurre. Al final cuenta el efectivo que dejas para el siguiente turno.</p>
+        {!activeCashBox ? <CashBoxStarter onOpen={onOpenCashBox} /> : (
+          <p>Fecha {activeCashBox.date}. Los ingresos y gastos que registres se guardan solo en esta jornada. Al cerrar caja dejan de mostrarse al siguiente turno.</p>
+        )}
       </div>
-      <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onDelete={onDeleteMovement} />
-      <MovementBox title="Gastos registrados" total={expenseTotal} status="bad" movements={expenses} emptyText="No hay gastos registrados para esta fecha." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('gasto')} onDelete={onDeleteMovement} />
+      {activeCashBox && (
+        <>
+          <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta caja." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onDelete={onDeleteMovement} />
+          <MovementBox title="Gastos registrados" total={expenseTotal} status="bad" movements={expenses} emptyText="No hay gastos registrados para esta caja." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('gasto')} onDelete={onDeleteMovement} />
+        </>
+      )}
       <div className="panel span-12">
         <div className="section-title"><h3>Operacion del turno</h3></div>
         <table>
@@ -418,6 +489,28 @@ function EmployeeView({ shifts, deleteUnlocked, onOpenShift, onOpenMovement, onD
         </div>
       </div>
     </section>
+  );
+}
+
+function CashBoxStarter({ onOpen }) {
+  const [date, setDate] = useState(today());
+  const [shiftName, setShiftName] = useState('Turno dia');
+
+  return (
+    <form className="form-grid cash-starter" onSubmit={(event) => { event.preventDefault(); onOpen({ date, shiftName }); }}>
+      <label className="span-field-4">Fecha
+        <input type="date" value={date} onChange={(event) => setDate(event.target.value)} required />
+      </label>
+      <label className="span-field-4">Jornada
+        <select value={shiftName} onChange={(event) => setShiftName(event.target.value)} required>
+          <option value="Turno dia">DIURNA</option>
+          <option value="Turno noche">NOCTURNA</option>
+        </select>
+      </label>
+      <div className="span-field-4 cash-starter-action">
+        <button className="primary">Abrir caja</button>
+      </div>
+    </form>
   );
 }
 
@@ -455,8 +548,9 @@ function MovementBox({ title, total, status, movements, emptyText, canDelete, on
   );
 }
 
-function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
-  const purchases = compras.cantidadRegistros ? cents(compras.totalDiario) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
+function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onShiftFilterChange, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
+  const syncedPurchases = shiftFilter ? purchaseTotalForShift(compras, shiftFilter) : num(compras.totalDiario);
+  const purchases = compras.cantidadRegistros ? cents(syncedPurchases) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
   const incomes = shifts.reduce((sum, shift) => sum + movementTotals(shift).ingreso, 0);
   const expenses = shifts.reduce((sum, shift) => sum + movementTotals(shift).gasto + movementTotals(shift).retiro, 0);
   const left = shifts.reduce((sum, shift) => sum + shiftCashLeft(shift), 0);
@@ -464,6 +558,24 @@ function OwnerView({ shifts, compras, onOpenShift, onOpenMovement, onDeleteShift
 
   return (
     <section className="grid">
+      <div className="panel span-12 private">
+        <div className="section-title"><h3>Filtros de revision</h3></div>
+        <div className="form-grid">
+          <label className="span-field-4">Fecha
+            <input type="date" value={activeDate} onChange={(event) => onDateChange(event.target.value)} />
+          </label>
+          <label className="span-field-4">Jornada
+            <select value={shiftFilter} onChange={(event) => onShiftFilterChange(event.target.value)}>
+              <option value="">Todas las jornadas</option>
+              <option value="Turno dia">DIURNA</option>
+              <option value="Turno noche">NOCTURNA</option>
+            </select>
+          </label>
+          <div className="span-field-4 filter-summary">
+            <span className="status info">{shiftFilter ? shiftShortName(shiftFilter) : 'Dia completo'}</span>
+          </div>
+        </div>
+      </div>
       <Metric title="Compras reportadas" value={money.format(fromCents(purchases))} note={compras.cantidadRegistros ? `${compras.cantidadRegistros} registros sincronizados` : 'Sistema de pesaje'} />
       <Metric title="Ingresos totales" value={money.format(fromCents(incomes))} note="Ventas y entradas a caja" />
       <Metric title="Gastos y retiros" value={money.format(fromCents(expenses))} note="Registrados por turno" />
@@ -1040,8 +1152,14 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
           <button type="button" className="icon-btn" onClick={onClose}>x</button>
         </div>
         <div className="form-grid">
-          <label className="span-field-3">Fecha<input type="date" value={form.date} onChange={(event) => setField('date', event.target.value)} required /></label>
-          <label className="span-field-3">Turno<select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required><option>Turno dia</option><option>Turno noche</option></select></label>
+          <label className="span-field-3">Fecha<input type="date" value={form.date} readOnly={form.lockShift} onChange={(event) => setField('date', event.target.value)} required /></label>
+          <label className="span-field-3">Turno
+            {form.lockShift ? (
+              <input value={shiftShortName(form.shiftName)} readOnly />
+            ) : (
+              <select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required>{shiftOptions.map((shift) => <option key={shift} value={shift}>{shiftShortName(shift)}</option>)}</select>
+            )}
+          </label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" min="0" step="0.01" value={form.openingCash} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
           {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" min="0" step="0.01" value={form.purchaseTotal} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
@@ -1085,8 +1203,14 @@ function MovementModal({ form, onClose, onChange, onSubmit }) {
           <button type="button" className="icon-btn" onClick={onClose}>x</button>
         </div>
         <div className="form-grid">
-          <label className="span-field-3">Fecha<input type="date" value={form.date} onChange={(event) => setField('date', event.target.value)} required /></label>
-          <label className="span-field-3">Turno<select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required><option>Turno dia</option><option>Turno noche</option></select></label>
+          <label className="span-field-3">Fecha<input type="date" value={form.date} readOnly={form.lockShift} onChange={(event) => setField('date', event.target.value)} required /></label>
+          <label className="span-field-3">Turno
+            {form.lockShift ? (
+              <input value={shiftShortName(form.shiftName)} readOnly />
+            ) : (
+              <select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required>{shiftOptions.map((shift) => <option key={shift} value={shift}>{shiftShortName(shift)}</option>)}</select>
+            )}
+          </label>
           <label className="span-field-3">Tipo<select value={form.type} onChange={(event) => setField('type', event.target.value)} required><option value="ingreso">Ingreso</option><option value="gasto">Gasto</option><option value="retiro">Retiro / entrega al dueno</option></select></label>
           <label className="span-field-3">Monto<input type="number" min="0" step="0.01" value={form.amount} onChange={(event) => setField('amount', event.target.value)} required /></label>
           <label className="span-field-4">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
@@ -1162,6 +1286,16 @@ function readSession() {
   }
 }
 
+function readActiveCashBox() {
+  try {
+    const value = JSON.parse(localStorage.getItem(ACTIVE_CASH_BOX_KEY));
+    if (!value?.date || !shiftOptions.includes(value?.shiftName)) return null;
+    return { date: value.date, shiftName: value.shiftName };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeData(value) {
   return {
     ...defaultData,
@@ -1204,15 +1338,34 @@ async function readJson(response) {
   }
 }
 
-function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, compras = defaultCompras) {
+function createOpenShift(shifts, date, shiftName, employeeName, compras = defaultCompras) {
+  return {
+    id: uid(),
+    date,
+    shiftName,
+    employeeName: employeeName || '',
+    openingCash: autoOpeningCash(shifts, date, shiftName),
+    purchaseTotal: purchaseTotalForShift(compras, shiftName),
+    status: 'abierto',
+    notes: '',
+    denoms: {},
+    otherCashAmount: 0,
+    otherCashReason: '',
+    movements: [],
+    savedAt: new Date().toISOString()
+  };
+}
+
+function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, compras = defaultCompras, forcedShiftName = '') {
   const shift = shifts.find((item) => item.id === id);
   const date = shift?.date || activeDate;
-  const shiftName = shift?.shiftName || 'Turno dia';
+  const shiftName = shift?.shiftName || forcedShiftName || 'Turno dia';
   const syncedPurchases = purchaseTotalForShift(compras, shiftName);
   return {
     id: shift?.id || '',
     date,
     shiftName,
+    lockShift: Boolean(forcedShiftName),
     employeeName: shift?.employeeName || fallbackName || '',
     openingCash: shift?.openingCash ?? autoOpeningCash(shifts, date, shiftName),
     purchaseTotal: shift?.purchaseTotal ?? syncedPurchases,
@@ -1224,12 +1377,13 @@ function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, comp
   };
 }
 
-function openMovementForm(shifts, activeDate, id, movementType, fallbackName) {
+function openMovementForm(shifts, activeDate, id, movementType, fallbackName, forcedShiftName = '', lockShift = false) {
   const movement = shifts.flatMap((shift) => (shift.movements || []).map((item) => ({ ...item, date: shift.date, shiftName: shift.shiftName }))).find((item) => item.id === id);
   return {
     id: movement?.id || '',
     date: movement?.date || activeDate,
-    shiftName: movement?.shiftName || 'Turno dia',
+    shiftName: movement?.shiftName || forcedShiftName || 'Turno dia',
+    lockShift,
     type: movement?.type || movementType || 'gasto',
     amount: movement?.amount ?? 0,
     employeeName: movement?.employeeName || fallbackName || '',
@@ -1259,7 +1413,12 @@ function addMovementToShift(shifts, date, shiftName, movement) {
 }
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
 }
 
 function uid() {
@@ -1341,6 +1500,10 @@ function jornadaMatchesShift(jornada, shiftName) {
   if (shift.includes('dia')) return value.includes('dia') || value.includes('diurna') || value.includes('manana') || value === '1';
 
   return value === shift;
+}
+
+function shiftShortName(shiftName) {
+  return shiftName === 'Turno noche' ? 'NOCTURNA' : 'DIURNA';
 }
 
 function normalizeText(value) {

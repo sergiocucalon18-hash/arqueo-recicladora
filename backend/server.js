@@ -7,12 +7,16 @@ import {
   leerComprasPorFecha,
   leerOpcionesReporte,
   resumirCompras,
-  sincronizarCompras
+  sincronizarCompras,
+  sincronizarComprasRecientes,
+  sincronizarComprasRango
 } from './comprasService.js';
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const syncIntervalSeconds = Number(process.env.SYNC_INTERVAL_SECONDS || 60);
+const syncBackfillDays = Number(process.env.SYNC_BACKFILL_DAYS || 30);
+const syncIntervalBackfillDays = Number(process.env.SYNC_INTERVAL_BACKFILL_DAYS || 2);
 
 app.use(cors());
 app.use(express.json());
@@ -71,6 +75,18 @@ app.post('/sync-compras-hoy', async (_req, res, next) => {
   }
 });
 
+app.post('/sync-compras-rango', async (req, res, next) => {
+  try {
+    const desde = req.query.desde || req.body?.desde;
+    const hasta = req.query.hasta || req.body?.hasta;
+    if (!desde) throw new Error('Debes enviar desde=YYYY-MM-DD.');
+    const resultados = await sincronizarComprasRango(desde, hasta);
+    res.json({ ok: true, fechas: resultados.map((item) => item.fecha), cantidadDias: resultados.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use((error, _req, res, _next) => {
   const message = errorMessage(error);
   console.error(message);
@@ -98,13 +114,13 @@ const server = app.listen(port, () => {
   console.log(`API REST escuchando en http://localhost:${port}`);
   console.log(`Endpoint principal: http://localhost:${port}/compras-hoy`);
 
-  sincronizarCompras(fechaBogota()).catch((error) => {
-    console.error('No se pudo hacer la sincronizacion inicial:', errorMessage(error));
+  sincronizarComprasRecientes(syncBackfillDays).catch((error) => {
+    console.error('No se pudo hacer la sincronizacion inicial de dias recientes:', errorMessage(error));
   });
 
   if (syncIntervalSeconds > 0) {
     setInterval(() => {
-      sincronizarCompras(fechaBogota()).catch((error) => {
+      sincronizarComprasRecientes(syncIntervalBackfillDays).catch((error) => {
         console.error('No se pudo sincronizar compras:', errorMessage(error));
       });
     }, syncIntervalSeconds * 1000);

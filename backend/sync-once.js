@@ -1,9 +1,21 @@
 import 'dotenv/config';
-import { fechaBogota, sincronizarCompras } from './comprasService.js';
+import { fechaBogota, sincronizarCompras, sincronizarComprasRecientes, sincronizarComprasRango } from './comprasService.js';
 
-const fecha = process.argv[2] || fechaBogota();
+async function run() {
+  const [arg, value, hasta] = process.argv.slice(2);
 
-sincronizarCompras(fecha)
+  if (arg === '--recent') {
+    return sincronizarComprasRecientes(Number(value || process.env.SYNC_BACKFILL_DAYS || 30));
+  }
+
+  if (arg === '--range') {
+    return sincronizarComprasRango(value, hasta || fechaBogota());
+  }
+
+  return sincronizarCompras(arg || fechaBogota());
+}
+
+run()
   .then((resumen) => {
     console.log(JSON.stringify(resumen, null, 2));
     process.exit(0);

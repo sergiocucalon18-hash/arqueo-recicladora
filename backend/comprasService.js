@@ -68,6 +68,35 @@ export async function sincronizarCompras(fecha = fechaBogota()) {
   return resumen;
 }
 
+export async function sincronizarComprasRango(desde, hasta = fechaBogota()) {
+  const fechas = await leerFechasConCompras(desde, hasta);
+  const resultados = [];
+
+  for (const fecha of fechas) {
+    resultados.push(await sincronizarCompras(fecha));
+  }
+
+  return resultados;
+}
+
+export async function sincronizarComprasRecientes(dias = 30) {
+  const hasta = fechaBogota();
+  const desde = addDays(hasta, -(Math.max(Number(dias) || 1, 1) - 1));
+  return sincronizarComprasRango(desde, hasta);
+}
+
+export async function leerFechasConCompras(desde, hasta = fechaBogota()) {
+  const [rows] = await pool.execute(
+    `SELECT DISTINCT DATE(fecha) AS fecha
+     FROM tbl_consolidado_compras
+     WHERE DATE(fecha) BETWEEN ? AND ?
+     ORDER BY fecha ASC`,
+    [desde, hasta]
+  );
+
+  return rows.map((row) => toDateOnly(row.fecha)).filter(Boolean);
+}
+
 export async function leerOpcionesReporte() {
   const [materials] = await pool.execute(
     `SELECT DISTINCT material
@@ -183,6 +212,12 @@ function normalizeDateTime(value) {
   if (!value) return '';
   const text = String(value).trim().replace('T', ' ');
   return text.length === 16 ? `${text}:00` : text;
+}
+
+function addDays(fecha, days) {
+  const value = new Date(`${fecha}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  return value.toISOString().slice(0, 10);
 }
 
 function normalizarCompra(row, index) {

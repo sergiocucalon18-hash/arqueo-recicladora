@@ -151,6 +151,12 @@ main {
 }
 
 .lower { margin-top: 14px; }
+.cash-starter { margin-top: 12px; }
+.cash-starter-action,
+.filter-summary {
+  display: flex;
+  align-items: flex-end;
+}
 
 .primary, .secondary, .danger {
   min-height: 40px;
