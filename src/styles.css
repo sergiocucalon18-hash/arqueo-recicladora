@@ -23,7 +23,10 @@ body {
   margin: 0;
   font-family: Inter, Arial, Helvetica, sans-serif;
   color: var(--ink);
-  background: radial-gradient(circle at top left, rgba(32, 107, 70, .12), transparent 32rem), var(--page);
+  background:
+    linear-gradient(135deg, rgba(32, 107, 70, .10), transparent 34rem),
+    linear-gradient(315deg, rgba(31, 95, 139, .08), transparent 26rem),
+    var(--page);
 }
 
 button, input, select, textarea { font: inherit; }
@@ -40,7 +43,7 @@ aside {
   position: sticky;
   top: 0;
   padding: 24px 18px;
-  background: linear-gradient(180deg, #173324, #10261b);
+  background: linear-gradient(180deg, #173324, #10261b 72%, #0d2018);
   color: #fff;
 }
 
@@ -87,11 +90,13 @@ aside {
   color: #dcebe1;
   text-align: left;
   font-weight: 800;
+  border: 1px solid transparent;
 }
 
 .nav button.active,
 .nav button:hover {
   background: #244d38;
+  border-color: rgba(255, 255, 255, .08);
   color: #fff;
 }
 
@@ -189,6 +194,10 @@ main {
   padding: 16px;
 }
 
+.panel:hover {
+  border-color: #c9d9d0;
+}
+
 .span-3 { grid-column: span 3; }
 .span-6 { grid-column: span 6; }
 .span-12 { grid-column: span 12; }
@@ -225,6 +234,10 @@ main {
 
 .reports-view .metric strong {
   font-size: 24px;
+}
+
+.salaries-view .metric strong {
+  font-size: 25px;
 }
 
 .report-actions {
@@ -329,6 +342,7 @@ input[readonly] {
   gap: 12px;
 }
 
+.span-field-2 { grid-column: span 2; }
 .span-field-3 { grid-column: span 3; }
 .span-field-4 { grid-column: span 4; }
 .span-field-6 { grid-column: span 6; }
@@ -554,7 +568,7 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 1040px) {
   .app { grid-template-columns: 1fr; }
   aside { position: relative; height: auto; }
-  .nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .nav { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .span-3, .span-6 { grid-column: span 12; }
   .denoms { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
