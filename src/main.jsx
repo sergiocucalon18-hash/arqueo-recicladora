@@ -1841,6 +1841,7 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
                   <div>
                     <b>{audit.title || 'Arqueo sin nombre'}</b>
                     <span>{audit.date} - {audit.rows?.length || 0} material(es)</span>
+                    <span>{auditMaterialSummary(audit)}</span>
                   </div>
                   <div><span>Diferencia</span><b className={materialDiffClass(audit.totals?.diff)}>{formatSignedWeight(audit.totals?.diff)}</b></div>
                   <div className="toolbar">
@@ -2858,6 +2859,13 @@ function filterMaterialAudits(audits = [], filters = {}) {
     materialRows: [...materialMap.values()].sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)),
     totals
   };
+}
+
+function auditMaterialSummary(audit) {
+  const materials = sortedUnique((audit?.rows || []).map((row) => row.material || 'Sin material'));
+  if (!materials.length) return 'Material: sin detalle';
+  if (materials.length > 5) return 'Materiales: Materiales varios';
+  return `${materials.length === 1 ? 'Material' : 'Materiales'}: ${materials.join(', ')}`;
 }
 
 function defaultUtilityFilters(date = today()) {
