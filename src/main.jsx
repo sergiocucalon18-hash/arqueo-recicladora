@@ -534,7 +534,7 @@ function App() {
         )}
 
         {activeView === 'materials' && ownerUnlocked && (
-          <MaterialsAuditView compras={comprasDiarias} />
+            <MaterialsAuditView compras={comprasDiarias} activeDate={activeDate} />
         )}
 
         {activeView === 'settings' && ownerUnlocked && (
@@ -897,6 +897,7 @@ function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustme
   const [form, setForm] = useState({ date: today(), employeeId: '', employeeName: '', type: 'bono', amount: '', note: '' });
   const [baseSalaries, setBaseSalaries] = useState({});
   const employeeChoices = useMemo(() => payrollEmployeeChoices(employees, shifts, adjustments), [employees, shifts, adjustments]);
+  const selectedEmployee = useMemo(() => findEmployeeByName(employeeChoices, filters.employeeName), [employeeChoices, filters.employeeName]);
   const vales = useMemo(() => payrollValeEntries(shifts, filters), [shifts, filters]);
   const filteredAdjustments = useMemo(() => payrollAdjustmentEntries(adjustments, filters), [adjustments, filters]);
   const summaries = useMemo(() => payrollSummaries(vales, filteredAdjustments, employeeChoices, filters), [vales, filteredAdjustments, employeeChoices, filters]);
@@ -947,12 +948,12 @@ function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustme
           <label className="span-field-3">Hasta<input type="date" value={filters.hasta} onChange={(event) => setFilter('hasta', event.target.value)} /></label>
           <label className="span-field-3">Empleado
             <select value={filters.employeeName} onChange={(event) => setFilter('employeeName', event.target.value)}>
-              <option value="">Todos</option>
+              <option value="">Todos con movimientos</option>
               {employeeChoices.map((employee) => <option key={employee.id} value={employee.fullName}>{employee.fullName}</option>)}
             </select>
           </label>
           <div className="span-field-3 filter-summary">
-            <span className="status info">{dateText(filters.desde)} a {dateText(filters.hasta)}</span>
+            <span className="status info">{selectedEmployee ? selectedEmployee.fullName : 'Todos'} - {dateText(filters.desde)} a {dateText(filters.hasta)}</span>
           </div>
         </div>
       </div>
@@ -985,10 +986,10 @@ function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustme
 
       <div className="panel span-12">
         <div className="section-title">
-          <h3>Resumen por empleado</h3>
+          <h3>{selectedEmployee ? `Cuadre de ${selectedEmployee.fullName}` : 'Resumen por empleado'}</h3>
           <span className="status info">{summaries.length} empleado(s)</span>
         </div>
-        {!summaries.length ? <Empty text="No hay vales ni ajustes en este rango." /> : (
+        {!summaries.length ? <Empty text="No hay vales ni ajustes para este filtro." /> : (
           <div className="table-wrap">
             <table>
               <thead>
@@ -1013,8 +1014,8 @@ function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustme
       </div>
 
       <div className="panel span-6">
-        <div className="section-title"><h3>Vales registrados</h3><span className="status warn">{money.format(fromCents(totals.vales))}</span></div>
-        {!vales.length ? <Empty text="No hay vales registrados en este rango." /> : (
+        <div className="section-title"><h3>{selectedEmployee ? `Vales de ${selectedEmployee.fullName}` : 'Vales registrados'}</h3><span className="status warn">{money.format(fromCents(totals.vales))}</span></div>
+        {!vales.length ? <Empty text="No hay vales registrados para este filtro." /> : (
           <div className="table-wrap">
             <table>
               <thead><tr><th>Fecha</th><th>Empleado</th><th>Motivo</th><th>Monto</th></tr></thead>
@@ -1034,8 +1035,8 @@ function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustme
       </div>
 
       <div className="panel span-6">
-        <div className="section-title"><h3>Bonos, extras y descuentos</h3></div>
-        {!filteredAdjustments.length ? <Empty text="No hay ajustes manuales en este rango." /> : (
+        <div className="section-title"><h3>{selectedEmployee ? `Bonos y descuentos de ${selectedEmployee.fullName}` : 'Bonos, extras y descuentos'}</h3></div>
+        {!filteredAdjustments.length ? <Empty text="No hay ajustes manuales para este filtro." /> : (
           <div className="table-wrap">
             <table>
               <thead><tr><th>Fecha</th><th>Empleado</th><th>Tipo</th><th>Monto</th><th></th></tr></thead>
@@ -1538,10 +1539,11 @@ function SalesReportPanel({ shifts, activeDate }) {
   );
 }
 
-function MaterialsAuditView({ compras }) {
+function MaterialsAuditView({ compras, activeDate }) {
   const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
   const [rows, setRows] = useState(() => [newMaterialAuditRow()]);
   const calculatedRows = rows.map(calculateMaterialAuditRow);
+  const reportRows = calculatedRows.filter(materialAuditRowHasData);
   const totals = calculatedRows.reduce((acc, row) => ({
     expected: acc.expected + row.expected,
     reported: acc.reported + row.reported,
@@ -1575,6 +1577,8 @@ function MaterialsAuditView({ compras }) {
         <div className="section-title">
           <h3>Arqueo por material</h3>
           <div className="toolbar">
+            <button className="primary" type="button" onClick={() => downloadMaterialAuditImage({ rows: reportRows, totals, activeDate })}>Imagen para jefe</button>
+            <button className="secondary" type="button" onClick={() => shareMaterialAuditReport({ rows: reportRows, totals, activeDate })}>Enviar resumen</button>
             <button className="secondary" type="button" onClick={clearRows}>Limpiar</button>
             <button className="primary" type="button" onClick={addRow}>Agregar material</button>
           </div>
@@ -1608,6 +1612,30 @@ function MaterialsAuditView({ compras }) {
           </table>
         </div>
         <p className="hint">Metales no ferrosos: (inventario kg + recuperado kg) x 2.2 x 1.10. Otros materiales: (inventario + recuperado) x 1.10.</p>
+      </div>
+
+      <div className="panel span-12 material-delivery-summary">
+        <div className="section-title">
+          <h3>Entrega organizada para jefe</h3>
+          <span className="status info">{reportRows.length} material(es)</span>
+        </div>
+        {!reportRows.length ? <Empty text="Agrega materiales al arqueo para generar el resumen de entrega." /> : (
+          <div className="delivery-list">
+            {reportRows.map((row, index) => (
+              <div className="delivery-item" key={row.id}>
+                <div>
+                  <b>{index + 1}. {row.material || 'Material sin nombre'}</b>
+                  <span>{materialAuditTypeLabel(row.materialType)} - reporte en {materialAuditUnit(row.materialType)}</span>
+                </div>
+                <div><span>Inventario</span><b>{formatWeight(row.inventoryWeight)} kg</b></div>
+                <div><span>Recuperado</span><b>{formatWeight(row.recoveredWeight)} kg</b></div>
+                <div><span>Teorico</span><b>{formatWeight(row.expected)} {materialAuditUnit(row.materialType)}</b></div>
+                <div><span>Recolector</span><b>{formatWeight(row.reported)} {materialAuditUnit(row.materialType)}</b></div>
+                <div><span>Diferencia</span><b className={materialDiffClass(row.diff)}>{formatSignedWeight(row.diff)} {materialAuditUnit(row.materialType)}</b></div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -2287,6 +2315,19 @@ function materialAuditUnit(materialType) {
   return materialAuditTypes.find((type) => type.value === materialType)?.reportUnit || 'kg';
 }
 
+function materialAuditTypeLabel(materialType) {
+  return materialAuditTypes.find((type) => type.value === materialType)?.label || 'Material';
+}
+
+function materialAuditRowHasData(row) {
+  return Boolean(
+    String(row.material || '').trim()
+    || num(row.inventoryWeight) > 0
+    || num(row.recoveredWeight) > 0
+    || num(row.reportedWeight) > 0
+  );
+}
+
 function materialDiffClass(diff) {
   if (Math.abs(diff) < 1) return 'ok';
   return diff > 0 ? 'warn' : 'bad';
@@ -2295,6 +2336,167 @@ function materialDiffClass(diff) {
 function materialDiffNote(diff) {
   if (Math.abs(diff) < 1) return 'Cuadra';
   return diff > 0 ? 'Sobra peso' : 'Falta peso';
+}
+
+function formatWeight(value) {
+  return roundWeight(num(value)).toLocaleString('es-CO');
+}
+
+function formatSignedWeight(value) {
+  const rounded = roundWeight(num(value));
+  if (Math.abs(rounded) < 1) return '0';
+  return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('es-CO')}`;
+}
+
+function materialAuditReportText({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate }) {
+  const validRows = rows.filter(materialAuditRowHasData);
+  const lines = [
+    `${companyInfo.name} - ARQUEO DE MATERIALES`,
+    `Fecha: ${activeDate || today()}`,
+    `Materiales en entrega: ${validRows.length}`,
+    `Teorico total: ${formatWeight(totals.expected)}`,
+    `Recolector total: ${formatWeight(totals.reported)}`,
+    `Diferencia total: ${formatSignedWeight(totals.diff)} (${materialDiffNote(totals.diff)})`,
+    '',
+    'DETALLE DE ENTREGA'
+  ];
+
+  validRows.forEach((row, index) => {
+    const unit = materialAuditUnit(row.materialType);
+    lines.push(
+      '',
+      `${index + 1}. ${String(row.material || 'Material sin nombre').trim()}`,
+      `Tipo: ${materialAuditTypeLabel(row.materialType)}`,
+      `Inventario sistema: ${formatWeight(row.inventoryWeight)} kg`,
+      `Recuperado: ${formatWeight(row.recoveredWeight)} kg`,
+      `Teorico: ${formatWeight(row.expected)} ${unit}`,
+      `Reporte recolector: ${formatWeight(row.reported)} ${unit}`,
+      `Diferencia: ${formatSignedWeight(row.diff)} ${unit} (${materialDiffNote(row.diff)})`
+    );
+  });
+
+  lines.push('', 'Formula: no ferrosos = (inventario + recuperado) x 2.2 x 1.10; otros = (inventario + recuperado) x 1.10.');
+  return lines.join('\n');
+}
+
+async function shareMaterialAuditReport({ rows = [], totals, activeDate }) {
+  const validRows = rows.filter(materialAuditRowHasData);
+  if (!validRows.length) {
+    alert('Agrega al menos un material al arqueo para enviar el resumen.');
+    return;
+  }
+
+  const text = materialAuditReportText({ rows: validRows, totals, activeDate });
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Arqueo de materiales', text });
+      return;
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+    }
+  }
+
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+}
+
+function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate }) {
+  const validRows = rows.filter(materialAuditRowHasData);
+  if (!validRows.length) {
+    alert('Agrega al menos un material al arqueo para generar la imagen.');
+    return;
+  }
+
+  const width = 1200;
+  const height = Math.max(760, 406 + (validRows.length * 104));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#f5f8f6';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#173324';
+  ctx.fillRect(0, 0, width, 132);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 42px Arial';
+  ctx.fillText(companyInfo.name, 44, 58);
+  ctx.font = '700 24px Arial';
+  ctx.fillText('Arqueo de materiales para entrega', 44, 98);
+  ctx.font = '18px Arial';
+  ctx.fillText(`Fecha ${activeDate || today()}`, 890, 58);
+  ctx.fillText(`${validRows.length} material(es)`, 890, 92);
+
+  const cards = [
+    ['Teorico total', formatWeight(totals.expected)],
+    ['Recolector total', formatWeight(totals.reported)],
+    [materialDiffNote(totals.diff), formatSignedWeight(totals.diff)],
+    ['Entrega', `${validRows.length} materiales`]
+  ];
+  let y = 164;
+  cards.forEach((card, index) => {
+    const x = 44 + index * 278;
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, x, y, 254, 86, 10);
+    ctx.fill();
+    ctx.fillStyle = '#66746c';
+    ctx.font = '700 16px Arial';
+    ctx.fillText(card[0], x + 18, y + 30);
+    ctx.fillStyle = index === 2 && totals.diff < -1 ? '#a92b22' : '#173324';
+    ctx.font = '700 28px Arial';
+    ctx.fillText(card[1], x + 18, y + 68);
+  });
+
+  y += 136;
+  ctx.fillStyle = '#16201a';
+  ctx.font = '700 24px Arial';
+  ctx.fillText('Detalle organizado de materiales', 44, y);
+  y += 28;
+
+  validRows.forEach((row, index) => {
+    const unit = materialAuditUnit(row.materialType);
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, 44, y, 1112, 88, 8);
+    ctx.fill();
+    ctx.fillStyle = '#16201a';
+    ctx.font = '700 19px Arial';
+    drawFittedText(ctx, `${index + 1}. ${row.material || 'Material sin nombre'}`, 62, y + 27, 510);
+    ctx.fillStyle = '#66746c';
+    ctx.font = '15px Arial';
+    drawFittedText(ctx, materialAuditTypeLabel(row.materialType), 62, y + 54, 510);
+    ctx.fillStyle = '#16201a';
+    ctx.font = '700 15px Arial';
+    ctx.fillText(`Inv. ${formatWeight(row.inventoryWeight)} kg`, 575, y + 28);
+    ctx.fillText(`Rec. ${formatWeight(row.recoveredWeight)} kg`, 575, y + 56);
+    ctx.fillText(`Teorico ${formatWeight(row.expected)} ${unit}`, 750, y + 28);
+    ctx.fillText(`Recolector ${formatWeight(row.reported)} ${unit}`, 750, y + 56);
+    ctx.fillStyle = materialDiffClass(row.diff) === 'bad' ? '#a92b22' : materialDiffClass(row.diff) === 'warn' ? '#9a6300' : '#206b46';
+    ctx.font = '700 17px Arial';
+    ctx.fillText(`Dif. ${formatSignedWeight(row.diff)} ${unit}`, 1000, y + 45);
+    y += 104;
+  });
+
+  ctx.fillStyle = '#66746c';
+  ctx.font = '15px Arial';
+  ctx.fillText('Formula: no ferrosos = (inventario + recuperado) x 2.2 x 1.10; otros = (inventario + recuperado) x 1.10.', 44, height - 34);
+
+  const link = document.createElement('a');
+  link.href = canvas.toDataURL('image/png');
+  link.download = `arqueo-materiales-${activeDate || today()}.png`;
+  link.click();
+}
+
+function drawFittedText(ctx, text, x, y, maxWidth) {
+  const value = String(text || '');
+  if (ctx.measureText(value).width <= maxWidth) {
+    ctx.fillText(value, x, y);
+    return;
+  }
+
+  let clipped = value;
+  while (clipped.length > 3 && ctx.measureText(`${clipped}...`).width > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  ctx.fillText(`${clipped}...`, x, y);
 }
 
 function downloadOwnerSummaryImage({ shifts = [], compras = defaultCompras, activeDate, shiftFilter }) {
@@ -2475,6 +2677,7 @@ function payrollAdjustmentEntries(adjustments = [], filters = {}) {
 
 function payrollSummaries(vales = [], adjustments = [], employees = [], filters = {}) {
   const rows = new Map();
+  const selectedEmployee = filters.employeeName ? findEmployeeByName(employees, filters.employeeName) : null;
 
   function rowFor(employeeName, employee = null) {
     const cleanName = cleanEmployeeName(employeeName);
@@ -2483,9 +2686,7 @@ function payrollSummaries(vales = [], adjustments = [], employees = [], filters 
     return rows.get(cleanName);
   }
 
-  employees
-    .filter((employee) => !filters.employeeName || normalizeText(employee.fullName) === normalizeText(filters.employeeName))
-    .forEach((employee) => rowFor(employee.fullName, employee));
+  if (selectedEmployee) rowFor(selectedEmployee.fullName, selectedEmployee);
 
   vales.forEach((vale) => {
     const row = rowFor(vale.employeeName, findEmployeeByName(employees, vale.employeeName));
@@ -2580,10 +2781,11 @@ function generatePayrollRole(row, filters, baseSalary, vales = [], adjustments =
   <title>Rol de pago - ${escapeHtml(employee.fullName)}</title>
   <style>
     body { margin: 0; padding: 32px; font-family: Arial, sans-serif; color: #1f2a24; background: #f4f7f5; }
-    .sheet { max-width: 820px; margin: 0 auto; background: #fff; border: 1px solid #d8e1dc; padding: 28px; }
-    .head { display: flex; justify-content: space-between; gap: 20px; border-bottom: 3px solid #173324; padding-bottom: 18px; }
-    .logo { width: 116px; height: 76px; border: 2px solid #173324; display: grid; place-items: center; background: #fff; padding: 6px; }
-    .logo img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .sheet { width: min(820px, calc(100vw - 64px)); margin: 0 auto; background: #fff; border: 1px solid #d8e1dc; padding: 28px; box-sizing: border-box; }
+    .head { display: grid; grid-template-columns: 92px minmax(0, 1fr) minmax(180px, auto); align-items: start; gap: 18px; border-bottom: 3px solid #173324; padding-bottom: 18px; }
+    .logo { width: 78px; height: 78px; display: grid; place-items: center; background: #fff; overflow: hidden; }
+    .logo img { display: block; max-width: 74px; max-height: 74px; object-fit: contain; }
+    .company { text-align: right; }
     h1, h2, p { margin: 0; }
     h1 { font-size: 26px; }
     h2 { margin-top: 24px; font-size: 18px; }
@@ -2597,19 +2799,25 @@ function generatePayrollRole(row, filters, baseSalary, vales = [], adjustments =
     .line { border-top: 1px solid #1f2a24; padding-top: 8px; text-align: center; }
     .actions { margin: 18px auto; max-width: 820px; text-align: right; }
     button { background: #206b46; color: #fff; border: 0; padding: 10px 14px; border-radius: 8px; font-weight: 800; cursor: pointer; }
-    @media print { body { background: #fff; padding: 0; } .sheet { border: 0; } .actions { display: none; } }
+    @media (max-width: 640px) {
+      body { padding: 16px; }
+      .sheet { width: 100%; padding: 18px; }
+      .head { grid-template-columns: 76px 1fr; }
+      .company { grid-column: 1 / -1; text-align: left; }
+    }
+    @media print { body { background: #fff; padding: 0; } .sheet { width: 100%; border: 0; } .actions { display: none; } }
   </style>
 </head>
 <body>
   <div class="actions"><button onclick="window.print()">Imprimir / guardar PDF</button></div>
   <main class="sheet">
     <section class="head">
+      <div class="logo"><img src="${escapeHtml(logoSrc)}" alt="${escapeHtml(companyInfo.name)}" /></div>
       <div>
         <h1>Rol de pago</h1>
         <p class="muted">${escapeHtml(filters.desde)} a ${escapeHtml(filters.hasta)}</p>
       </div>
-      <div class="logo"><img src="${escapeHtml(logoSrc)}" alt="${escapeHtml(companyInfo.name)}" /></div>
-      <div>
+      <div class="company">
         <p><b>Empresa:</b> ${escapeHtml(companyInfo.name)}</p>
         <p><b>RUC:</b> ${escapeHtml(companyInfo.ruc)}</p>
       </div>
