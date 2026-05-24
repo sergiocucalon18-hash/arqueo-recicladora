@@ -2313,6 +2313,7 @@ function downloadOwnerSummaryImage({ shifts = [], compras = defaultCompras, acti
   const incomes = incomeMovements.reduce((sum, movement) => sum + cents(movement.amount), 0);
   const expenses = expenseMovements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro').reduce((sum, movement) => sum + cents(movement.amount), 0);
   const vales = expenseMovements.filter((movement) => movement.type === 'vale').reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const opening = shifts.reduce((sum, shift) => sum + cents(shift.openingCash), 0);
   const left = shifts.reduce((sum, shift) => sum + shiftCashLeft(shift), 0);
   const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
 
@@ -2330,6 +2331,7 @@ function downloadOwnerSummaryImage({ shifts = [], compras = defaultCompras, acti
   ctx.fillText(`Generado ${dateText(new Date().toISOString())}`, 850, 92);
 
   const cards = [
+    ['Saldo inicial', opening],
     ['Compras', purchases],
     ['Ingresos', incomes],
     ['Gastos/retiros', expenses],
@@ -2339,20 +2341,20 @@ function downloadOwnerSummaryImage({ shifts = [], compras = defaultCompras, acti
   ];
   let y = 164;
   cards.forEach((card, index) => {
-    const x = 44 + (index % 3) * 370;
-    const cardY = y + Math.floor(index / 3) * 112;
+    const x = 44 + (index % 4) * 278;
+    const cardY = y + Math.floor(index / 4) * 104;
     ctx.fillStyle = '#ffffff';
-    roundRect(ctx, x, cardY, 330, 84, 10);
+    roundRect(ctx, x, cardY, 254, 84, 10);
     ctx.fill();
     ctx.fillStyle = '#66746c';
     ctx.font = '700 16px Arial';
     ctx.fillText(card[0], x + 18, cardY + 28);
-    ctx.fillStyle = index === 5 && diff < -99 ? '#a92b22' : '#173324';
-    ctx.font = '700 30px Arial';
+    ctx.fillStyle = card[0] === diffText(diff) && diff < -99 ? '#a92b22' : '#173324';
+    ctx.font = '700 27px Arial';
     ctx.fillText(money.format(fromCents(card[1])), x + 18, cardY + 66);
   });
 
-  y += 250;
+  y += 232;
   ctx.fillStyle = '#16201a';
   ctx.font = '700 24px Arial';
   ctx.fillText('Turnos', 44, y);
