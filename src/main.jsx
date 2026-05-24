@@ -150,10 +150,10 @@ function App() {
   );
   const pageCopy = {
     employee: ['Registrar caja del turno', 'Registra ingresos, gastos y cierre de efectivo del turno.'],
-    owner: ['Revision privada del dueno', 'Cuadres, diferencias, reportes y edicion completa.'],
-    salaries: ['Sueldos empleados', 'Vales, bonos, extras y descuentos por rango de fechas.'],
-    reports: ['Reportes de compras', 'Consulta compras por material, jornada, dia completo o rangos de fecha y hora.'],
-    materials: ['Arqueo materiales', 'Compara inventario, recuperacion y peso reportado por recolector.'],
+    owner: ['Cuadrar Caja', 'Cuadres, diferencias, reportes y edicion completa.'],
+    salaries: ['Sueldo Empleados', 'Vales, bonos, extras y descuentos por rango de fechas.'],
+    reports: ['Reporte General', 'Consulta compras por material, jornada, dia completo o rangos de fecha y hora.'],
+    materials: ['Arqueo Materiales', 'Compara inventario, recuperacion y peso reportado por recolector.'],
     settings: ['Configuracion', 'Claves, respaldo, importacion y limpieza de datos.']
   };
 
@@ -449,10 +449,10 @@ function App() {
 
         <nav className="nav" aria-label="Navegacion principal">
           <button className={activeView === 'employee' ? 'active' : ''} onClick={() => setActiveView('employee')}>Registrar turno</button>
-          {ownerUnlocked && <button className={activeView === 'owner' ? 'active' : ''} onClick={() => setActiveView('owner')}>Revision dueno</button>}
-          {ownerUnlocked && <button className={activeView === 'salaries' ? 'active' : ''} onClick={() => setActiveView('salaries')}>Sueldos empleados</button>}
-          {ownerUnlocked && <button className={activeView === 'reports' ? 'active' : ''} onClick={() => setActiveView('reports')}>Reportes</button>}
-          {ownerUnlocked && <button className={activeView === 'materials' ? 'active' : ''} onClick={() => setActiveView('materials')}>Arqueo materiales</button>}
+          {ownerUnlocked && <button className={activeView === 'owner' ? 'active' : ''} onClick={() => setActiveView('owner')}>Cuadrar Caja</button>}
+          {ownerUnlocked && <button className={activeView === 'salaries' ? 'active' : ''} onClick={() => setActiveView('salaries')}>Sueldo Empleados</button>}
+          {ownerUnlocked && <button className={activeView === 'reports' ? 'active' : ''} onClick={() => setActiveView('reports')}>Reporte General</button>}
+          {ownerUnlocked && <button className={activeView === 'materials' ? 'active' : ''} onClick={() => setActiveView('materials')}>Arqueo Materiales</button>}
           {ownerUnlocked && <button className={activeView === 'settings' ? 'active' : ''} onClick={() => setActiveView('settings')}>Configuracion</button>}
         </nav>
 
