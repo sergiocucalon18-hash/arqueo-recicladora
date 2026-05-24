@@ -1372,7 +1372,10 @@ function ReportsView({ activeDate, shifts = [] }) {
   }
 
   function setFullDay() {
-    setFilters((current) => ({ ...current, desde: `${activeDate}T00:00`, hasta: `${activeDate}T23:59` }));
+    setFilters((current) => {
+      const date = String(current.desde || current.hasta || activeDate).slice(0, 10) || activeDate;
+      return { ...current, desde: `${date}T00:00`, hasta: `${date}T23:59` };
+    });
   }
 
   function clearFilters() {
@@ -1625,7 +1628,10 @@ function MaterialsAuditView({ compras, activeDate }) {
             <input type="datetime-local" value={lookupFilters.hasta} onChange={(event) => setLookupFilter('hasta', event.target.value)} required />
           </label>
           <label className="span-field-3">Material
-            <input value={lookupFilters.material} list="material-options" onChange={(event) => setLookupFilter('material', event.target.value)} placeholder="Vacio = todos" />
+            <select value={lookupFilters.material} onChange={(event) => setLookupFilter('material', event.target.value)}>
+              <option value="">Todos los materiales</option>
+              {materialOptions.map((material) => <option key={material} value={material}>{material}</option>)}
+            </select>
           </label>
           <div className="span-field-3 report-actions">
             <button className="primary" disabled={lookupLoading}>{lookupLoading ? 'Consultando...' : 'Consultar'}</button>
