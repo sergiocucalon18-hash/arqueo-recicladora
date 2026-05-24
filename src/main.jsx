@@ -173,13 +173,15 @@ function App() {
       return;
     }
     const next = { role, name: cleanName };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(next));
+    localStorage.removeItem(SESSION_KEY);
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
     setSession(next);
     setActiveView(role === 'owner' ? 'owner' : 'employee');
   }
 
   function logout() {
     localStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(SESSION_KEY);
     setSession(null);
     setDeleteUnlocked(false);
     setActiveView('employee');
@@ -2035,7 +2037,8 @@ function csvValue(value) {
 
 function readSession() {
   try {
-    return JSON.parse(localStorage.getItem(SESSION_KEY));
+    localStorage.removeItem(SESSION_KEY);
+    return JSON.parse(sessionStorage.getItem(SESSION_KEY));
   } catch {
     return null;
   }
