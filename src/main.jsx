@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { signInAnonymously } from 'firebase/auth';
 import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
+import logoUrl from '../LOGO.png';
 import './styles.css';
 
 const DATA_REF = doc(db, 'arqueos', 'almetales');
@@ -11,15 +12,28 @@ const SESSION_KEY = 'arqueo-recicladora-session';
 const ACTIVE_CASH_BOX_KEY = 'almetales-active-cash-box';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const denominations = [20, 10, 5, 1, 0.5, 0.25, 0.1, 0.05];
-const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], payrollAdjustments: [], updatedAt: '' };
+const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], payrollAdjustments: [], employees: [], updatedAt: '' };
 const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], opciones: null, actualizadoEn: '' };
 const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
 const shiftOptions = ['Turno dia', 'Turno noche'];
+const incomeTypes = [
+  { value: 'general', label: 'Ingreso general' },
+  { value: 'ventas', label: 'Ventas' }
+];
+const expenseTypes = [
+  { value: 'gasto', label: 'Gasto' },
+  { value: 'retiro', label: 'Retiro / entrega al dueno' }
+];
+const materialAuditTypes = [
+  { value: 'nonFerrous', label: 'Metales no ferrosos', reportUnit: 'lb' },
+  { value: 'standard', label: 'Pet, carton, chatarra u otros', reportUnit: 'kg' }
+];
 const payrollAdjustmentTypes = [
   { value: 'bono', label: 'Bono', sign: 1 },
   { value: 'extra', label: 'Extra', sign: 1 },
   { value: 'descuento', label: 'Descuento', sign: -1 }
 ];
+const companyInfo = { name: 'ALMETALES', ruc: '0962596649001' };
 
 function App() {
   const [data, setData] = useState(defaultData);
@@ -139,6 +153,7 @@ function App() {
     owner: ['Revision privada del dueno', 'Cuadres, diferencias, reportes y edicion completa.'],
     salaries: ['Sueldos empleados', 'Vales, bonos, extras y descuentos por rango de fechas.'],
     reports: ['Reportes de compras', 'Consulta compras por material, jornada, dia completo o rangos de fecha y hora.'],
+    materials: ['Arqueo materiales', 'Compara inventario, recuperacion y peso reportado por recolector.'],
     settings: ['Configuracion', 'Claves, respaldo, importacion y limpieza de datos.']
   };
 
@@ -229,13 +244,17 @@ function App() {
       ? data.shifts.find((entry) => entry.id === form.id)
       : findShift(data.shifts, form.date, form.shiftName);
     const id = existing?.id || uid();
+    const syncedPurchaseTotal = purchaseTotalForShift(comprasDiarias, form.shiftName);
+    const purchaseTotal = ownerUnlocked
+      ? num(form.purchaseTotal)
+      : syncedPurchaseTotal > 0 ? syncedPurchaseTotal : num(existing?.purchaseTotal ?? form.purchaseTotal);
     const shift = {
       id,
       date: form.date,
       shiftName: form.shiftName,
       employeeName: form.employeeName.trim(),
       openingCash: ownerUnlocked ? num(form.openingCash) : num(existing?.openingCash ?? form.openingCash ?? autoOpeningCash(data.shifts, form.date, form.shiftName)),
-      purchaseTotal: num(form.purchaseTotal),
+      purchaseTotal,
       status: 'cerrado',
       notes: form.notes.trim(),
       denoms: normalizeDenoms(form.denoms),
@@ -244,7 +263,8 @@ function App() {
       movements: existing?.movements || [],
       savedAt: new Date().toISOString()
     };
-    await persist({ ...data, shifts: upsert(data.shifts, shift) });
+    const shifts = cascadeOpeningCash(upsert(data.shifts, shift), shift);
+    await persist({ ...data, shifts });
     setShiftModal(null);
     if (activeCashBox?.date === form.date && activeCashBox?.shiftName === form.shiftName) {
       clearActiveCashBox();
@@ -257,18 +277,24 @@ function App() {
       return;
     }
 
-    if (form.type === 'vale' && !form.beneficiaryName?.trim()) {
-      alert('Escribe el empleado que recibe el vale.');
+    const selectedBeneficiary = form.type === 'vale'
+      ? employeeFromForm(data.employees, form.beneficiaryId, form.beneficiaryName)
+      : null;
+
+    if (form.type === 'vale' && !selectedBeneficiary?.fullName) {
+      alert('Selecciona el empleado que recibe el vale.');
       return;
     }
 
     const movement = {
       id: form.id || uid(),
       type: form.type,
+      incomeType: form.type === 'ingreso' ? (form.incomeType || 'general') : '',
       amount: num(form.amount),
-      reason: form.reason.trim() || movementTypeLabel(form.type),
+      reason: form.reason.trim() || movementTypeLabel(form.type, form.incomeType),
       employeeName: form.employeeName.trim(),
-      beneficiaryName: form.type === 'vale' ? form.beneficiaryName.trim() : '',
+      beneficiaryId: form.type === 'vale' ? selectedBeneficiary.id : '',
+      beneficiaryName: form.type === 'vale' ? selectedBeneficiary.fullName : '',
       savedAt: new Date().toISOString()
     };
     const cleaned = data.shifts.map((shift) => ({
@@ -281,11 +307,12 @@ function App() {
   }
 
   async function savePayrollAdjustment(form) {
-    const employeeName = String(form.employeeName || '').trim();
+    const selectedEmployee = employeeFromForm(data.employees, form.employeeId, form.employeeName);
+    const employeeName = String(selectedEmployee?.fullName || form.employeeName || '').trim();
     const amount = num(form.amount);
 
     if (!employeeName) {
-      alert('Escribe el nombre del empleado.');
+      alert('Selecciona el empleado.');
       return false;
     }
 
@@ -297,6 +324,7 @@ function App() {
     const adjustment = {
       id: form.id || uid(),
       date: form.date || today(),
+      employeeId: selectedEmployee?.id || '',
       employeeName,
       type: form.type || 'bono',
       amount,
@@ -306,6 +334,35 @@ function App() {
 
     await persist({ ...data, payrollAdjustments: upsert(data.payrollAdjustments || [], adjustment) });
     return true;
+  }
+
+  async function saveEmployee(form) {
+    if (!ownerUnlocked) return false;
+
+    const fullName = String(form.fullName || '').trim();
+    const cedula = String(form.cedula || '').trim();
+    const phone = String(form.phone || '').trim();
+
+    if (!fullName || !cedula || !phone) {
+      alert('Completa nombre, cedula y telefono del empleado.');
+      return false;
+    }
+
+    const employee = {
+      id: form.id || uid(),
+      fullName,
+      cedula,
+      phone,
+      savedAt: new Date().toISOString()
+    };
+
+    await persist({ ...data, employees: upsert(data.employees || [], employee) });
+    return true;
+  }
+
+  async function deleteEmployee(id) {
+    if (!ownerUnlocked || !confirm('Eliminar este empleado?')) return;
+    await persist({ ...data, employees: (data.employees || []).filter((employee) => employee.id !== id) });
   }
 
   async function deletePayrollAdjustment(id) {
@@ -381,7 +438,7 @@ function App() {
     <div className="app">
       <aside>
         <div className="brand">
-          <div className="brand-mark">$</div>
+          <img className="brand-logo" src={logoUrl} alt="ALMETALES" />
           <div>
             <h1>ALMETALES</h1>
             <span>Turno dia y turno noche</span>
@@ -393,6 +450,7 @@ function App() {
           {ownerUnlocked && <button className={activeView === 'owner' ? 'active' : ''} onClick={() => setActiveView('owner')}>Revision dueno</button>}
           {ownerUnlocked && <button className={activeView === 'salaries' ? 'active' : ''} onClick={() => setActiveView('salaries')}>Sueldos empleados</button>}
           {ownerUnlocked && <button className={activeView === 'reports' ? 'active' : ''} onClick={() => setActiveView('reports')}>Reportes</button>}
+          {ownerUnlocked && <button className={activeView === 'materials' ? 'active' : ''} onClick={() => setActiveView('materials')}>Arqueo materiales</button>}
           {ownerUnlocked && <button className={activeView === 'settings' ? 'active' : ''} onClick={() => setActiveView('settings')}>Configuracion</button>}
         </nav>
 
@@ -465,17 +523,29 @@ function App() {
           <SalariesView
             shifts={data.shifts}
             adjustments={data.payrollAdjustments}
+            employees={data.employees}
             onSaveAdjustment={savePayrollAdjustment}
             onDeleteAdjustment={deletePayrollAdjustment}
           />
         )}
 
         {activeView === 'reports' && ownerUnlocked && (
-          <ReportsView activeDate={activeDate} />
+          <ReportsView activeDate={activeDate} shifts={data.shifts} />
+        )}
+
+        {activeView === 'materials' && ownerUnlocked && (
+          <MaterialsAuditView compras={comprasDiarias} />
         )}
 
         {activeView === 'settings' && ownerUnlocked && (
-          <SettingsView data={data} onSave={saveConfig} onImport={importData} onClear={clearData} />
+          <SettingsView
+            data={data}
+            onSave={saveConfig}
+            onImport={importData}
+            onClear={clearData}
+            onSaveEmployee={saveEmployee}
+            onDeleteEmployee={deleteEmployee}
+          />
         )}
       </main>
 
@@ -493,6 +563,7 @@ function App() {
       {movementModal && (
         <MovementModal
           form={movementModal}
+          employees={data.employees}
           onClose={() => setMovementModal(null)}
           onChange={setMovementModal}
           onSubmit={saveMovement}
@@ -516,7 +587,7 @@ function Login({ data, loading, syncError, onLogin }) {
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
         <div className="brand login-brand">
-          <div className="brand-mark">$</div>
+          <img className="brand-logo" src={logoUrl} alt="ALMETALES" />
           <div>
             <h1>ALMETALES</h1>
             <span>Sincronizado con Firestore</span>
@@ -651,7 +722,7 @@ function MovementBox({ title, total, status, movements, emptyText, canDelete, on
               {movements.map((movement) => (
                 <tr key={movement.id}>
                   <td>{movement.shiftName}</td>
-                  <td><span className={`status mini ${movementTypeStatus(movement.type)}`}>{movementTypeLabel(movement.type)}</span></td>
+                  <td><span className={`status mini ${movementTypeStatus(movement.type)}`}>{movementLabel(movement)}</span></td>
                   <td>{movement.beneficiaryName && <b>{movement.beneficiaryName}: </b>}{movement.reason}</td>
                   <td>{money.format(num(movement.amount))}</td>
                   <td>{movement.employeeName || '-'}</td>
@@ -669,9 +740,16 @@ function MovementBox({ title, total, status, movements, emptyText, canDelete, on
 function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onShiftFilterChange, onOpenShift, onOpenMovement, onDeleteShift, onDeleteMovement }) {
   const syncedPurchases = shiftFilter ? purchaseTotalForShift(compras, shiftFilter) : num(compras.totalDiario);
   const purchases = compras.cantidadRegistros ? cents(syncedPurchases) : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
-  const incomes = shifts.reduce((sum, shift) => sum + movementTotals(shift).ingreso, 0);
-  const expenses = shifts.reduce((sum, shift) => sum + movementTotals(shift).gasto + movementTotals(shift).retiro, 0);
-  const vales = shifts.reduce((sum, shift) => sum + movementTotals(shift).vale, 0);
+  const movements = shiftMovementEntries(shifts);
+  const incomeMovements = movements.filter((movement) => movement.type === 'ingreso');
+  const expenseMovements = movements.filter((movement) => movement.type !== 'ingreso');
+  const incomes = incomeMovements.reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const expenses = expenseMovements
+    .filter((movement) => movement.type === 'gasto' || movement.type === 'retiro')
+    .reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const vales = expenseMovements
+    .filter((movement) => movement.type === 'vale')
+    .reduce((sum, movement) => sum + cents(movement.amount), 0);
   const left = shifts.reduce((sum, shift) => sum + shiftCashLeft(shift), 0);
   const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
 
@@ -703,8 +781,9 @@ function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onS
       <Metric title="Diferencia neta" value={money.format(fromCents(diff))} note={shifts.length ? diffText(diff) : 'Sin cierres'} />
       <div className="panel span-12 private">
         <div className="section-title">
-          <h3>Cuadre de turnos</h3>
+          <h3>Resumen de caja por turno</h3>
           <div className="toolbar no-print">
+            <button className="primary" onClick={() => downloadOwnerSummaryImage({ shifts, compras, activeDate, shiftFilter })}>Imagen para jefe</button>
             <button className="secondary" onClick={() => onOpenMovement(null)}>Agregar movimiento</button>
             <button className="secondary" onClick={() => onOpenShift(null)}>Agregar cierre</button>
           </div>
@@ -722,6 +801,26 @@ function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onS
           </div>
         )}
       </div>
+
+      <MovementReviewTable
+        title="Ingresos y ventas"
+        total={incomes}
+        status="ok"
+        movements={incomeMovements}
+        emptyText="No hay ingresos registrados para esta revision."
+        onOpenMovement={onOpenMovement}
+        onDeleteMovement={onDeleteMovement}
+      />
+
+      <MovementReviewTable
+        title="Gastos, retiros y vales"
+        total={expenses + vales}
+        status="bad"
+        movements={expenseMovements}
+        emptyText="No hay gastos, retiros ni vales registrados para esta revision."
+        onOpenMovement={onOpenMovement}
+        onDeleteMovement={onDeleteMovement}
+      />
     </section>
   );
 }
@@ -747,16 +846,6 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
         <td><span className={`status ${diffClass(diff)}`}>{diffText(diff)} {money.format(Math.abs(fromCents(diff)))}</span></td>
         <td><RowActions onEdit={() => onOpenShift(shift.id)} onDelete={() => onDeleteShift(shift.id)} /></td>
       </tr>
-      {(shift.movements || []).length === 0 && <tr><td colSpan="12" className="muted">Sin movimientos registrados durante el turno.</td></tr>}
-      {(shift.movements || []).map((movement) => (
-        <tr key={movement.id} className="subrow">
-          <td colSpan="3">{timeText(movement.savedAt)}</td>
-          <td colSpan="6"><span className={`status mini ${movementTypeStatus(movement.type)}`}>{movementTypeLabel(movement.type)}</span> {movement.beneficiaryName && <b>{movement.beneficiaryName}: </b>}{movement.reason}</td>
-          <td>{money.format(num(movement.amount))}</td>
-          <td>{movement.employeeName || '-'}</td>
-          <td><RowActions onEdit={() => onOpenMovement(movement.id)} onDelete={() => onDeleteMovement(shift.id, movement.id)} /></td>
-        </tr>
-      ))}
       {num(shift.otherCashAmount) > 0 && (
         <tr className="subrow">
           <td colSpan="3">Otros efectivo</td>
@@ -771,19 +860,54 @@ function OwnerShiftRows({ shift, onOpenShift, onOpenMovement, onDeleteShift, onD
   );
 }
 
-function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdjustment }) {
+function MovementReviewTable({ title, total, status, movements, emptyText, onOpenMovement, onDeleteMovement }) {
+  return (
+    <div className="panel span-6">
+      <div className="section-title">
+        <h3>{title}</h3>
+        <span className={`status ${status}`}>{money.format(fromCents(total))}</span>
+      </div>
+      {!movements.length ? <Empty text={emptyText} /> : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Turno</th><th>Tipo</th><th>Detalle</th><th>Monto</th><th>Registra</th><th></th></tr>
+            </thead>
+            <tbody>
+              {movements.map((movement) => (
+                <tr key={movement.id}>
+                  <td>{shiftShortName(movement.shiftName)}</td>
+                  <td><span className={`status mini ${movementTypeStatus(movement.type)}`}>{movementLabel(movement)}</span></td>
+                  <td>{movement.beneficiaryName && <b>{movement.beneficiaryName}: </b>}{movement.reason || '-'}</td>
+                  <td>{money.format(num(movement.amount))}</td>
+                  <td>{movement.employeeName || '-'}</td>
+                  <td><RowActions onEdit={() => onOpenMovement(movement.id)} onDelete={() => onDeleteMovement(movement.shiftId, movement.id)} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SalariesView({ shifts, adjustments = [], employees = [], onSaveAdjustment, onDeleteAdjustment }) {
   const [filters, setFilters] = useState(() => ({ desde: firstDayOfMonth(today()), hasta: today(), employeeName: '' }));
-  const [form, setForm] = useState({ date: today(), employeeName: '', type: 'bono', amount: '', note: '' });
-  const employees = useMemo(() => payrollEmployees(shifts, adjustments), [shifts, adjustments]);
+  const [form, setForm] = useState({ date: today(), employeeId: '', employeeName: '', type: 'bono', amount: '', note: '' });
+  const [baseSalaries, setBaseSalaries] = useState({});
+  const employeeChoices = useMemo(() => payrollEmployeeChoices(employees, shifts, adjustments), [employees, shifts, adjustments]);
   const vales = useMemo(() => payrollValeEntries(shifts, filters), [shifts, filters]);
   const filteredAdjustments = useMemo(() => payrollAdjustmentEntries(adjustments, filters), [adjustments, filters]);
-  const summaries = useMemo(() => payrollSummaries(vales, filteredAdjustments), [vales, filteredAdjustments]);
+  const summaries = useMemo(() => payrollSummaries(vales, filteredAdjustments, employeeChoices, filters), [vales, filteredAdjustments, employeeChoices, filters]);
   const totals = summaries.reduce((acc, row) => ({
+    base: acc.base + cents(baseSalaries[row.employeeName]),
     vales: acc.vales + row.vales,
     additions: acc.additions + row.additions,
     deductions: acc.deductions + row.deductions,
-    net: acc.net + row.net
-  }), { vales: 0, additions: 0, deductions: 0, net: 0 });
+    net: acc.net + row.net,
+    totalPay: acc.totalPay + cents(baseSalaries[row.employeeName]) + row.net
+  }), { base: 0, vales: 0, additions: 0, deductions: 0, net: 0, totalPay: 0 });
 
   function setFilter(field, value) {
     setFilters((current) => ({ ...current, [field]: value }));
@@ -791,6 +915,21 @@ function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdju
 
   function setField(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function selectFormEmployee(employeeId) {
+    const employee = findEmployeeById(employeeChoices, employeeId);
+    setForm((current) => ({ ...current, employeeId, employeeName: employee?.fullName || '' }));
+  }
+
+  function setBaseSalary(employeeName, value) {
+    setBaseSalaries((current) => ({ ...current, [employeeName]: value }));
+  }
+
+  function generateRole(row) {
+    const rowVales = vales.filter((vale) => normalizeText(vale.employeeName) === normalizeText(row.employeeName));
+    const rowAdjustments = filteredAdjustments.filter((item) => normalizeText(item.employeeName) === normalizeText(row.employeeName));
+    generatePayrollRole(row, filters, baseSalaries[row.employeeName], rowVales, rowAdjustments);
   }
 
   async function submitAdjustment(event) {
@@ -809,7 +948,7 @@ function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdju
           <label className="span-field-3">Empleado
             <select value={filters.employeeName} onChange={(event) => setFilter('employeeName', event.target.value)}>
               <option value="">Todos</option>
-              {employees.map((employee) => <option key={employee} value={employee}>{employee}</option>)}
+              {employeeChoices.map((employee) => <option key={employee.id} value={employee.fullName}>{employee.fullName}</option>)}
             </select>
           </label>
           <div className="span-field-3 filter-summary">
@@ -821,15 +960,17 @@ function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdju
       <Metric title="Vales del periodo" value={money.format(fromCents(totals.vales))} note="Se descuentan del pago" />
       <Metric title="Bonos y extras" value={money.format(fromCents(totals.additions))} note="A favor del empleado" />
       <Metric title="Otros descuentos" value={money.format(fromCents(totals.deductions))} note="Adicionales al vale" />
-      <Metric title="Neto ajustes" value={money.format(fromCents(totals.net))} note={payrollNetNote(totals.net)} />
+      <Metric title="Total a pagar" value={money.format(fromCents(totals.totalPay))} note="Sueldo base mas ajustes" />
 
       <div className="panel span-12">
         <div className="section-title"><h3>Agregar bono, extra o descuento</h3></div>
         <form className="form-grid" onSubmit={submitAdjustment}>
           <label className="span-field-2">Fecha<input type="date" value={form.date} onChange={(event) => setField('date', event.target.value)} required /></label>
           <label className="span-field-3">Empleado
-            <input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} list="payroll-employees" placeholder="Nombre" required />
-            <datalist id="payroll-employees">{employees.map((employee) => <option key={employee} value={employee} />)}</datalist>
+            <select value={form.employeeId} onChange={(event) => selectFormEmployee(event.target.value)} required>
+              <option value="">Selecciona empleado</option>
+              {employeeChoices.map((employee) => <option key={employee.id} value={employee.id}>{employee.fullName}</option>)}
+            </select>
           </label>
           <label className="span-field-2">Tipo
             <select value={form.type} onChange={(event) => setField('type', event.target.value)} required>
@@ -851,16 +992,18 @@ function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdju
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Empleado</th><th>Vales</th><th>Bonos / extras</th><th>Descuentos</th><th>Neto ajustes</th></tr>
+                <tr><th>Empleado</th><th>Sueldo base</th><th>Vales</th><th>Bonos / extras</th><th>Descuentos</th><th>Total</th><th></th></tr>
               </thead>
               <tbody>
                 {summaries.map((row) => (
                   <tr key={row.employeeName}>
-                    <td><b>{row.employeeName}</b></td>
+                    <td><b>{row.employeeName}</b><br /><small>{row.employee?.cedula ? `Cedula ${row.employee.cedula}` : 'Sin cedula registrada'}</small></td>
+                    <td><input className="table-input" type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(baseSalaries[row.employeeName])} onChange={(event) => setBaseSalary(row.employeeName, event.target.value)} placeholder="0.00" /></td>
                     <td>{money.format(fromCents(row.vales))}</td>
                     <td>{money.format(fromCents(row.additions))}</td>
                     <td>{money.format(fromCents(row.deductions))}</td>
-                    <td><span className={`status ${row.net < 0 ? 'bad' : row.net > 0 ? 'ok' : 'info'}`}>{money.format(fromCents(row.net))}</span></td>
+                    <td><span className={`status ${cents(baseSalaries[row.employeeName]) + row.net < 0 ? 'bad' : 'ok'}`}>{money.format(fromCents(cents(baseSalaries[row.employeeName]) + row.net))}</span></td>
+                    <td><button className="secondary" type="button" onClick={() => generateRole(row)}>Generar Rol De Pago</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -915,7 +1058,7 @@ function SalariesView({ shifts, adjustments = [], onSaveAdjustment, onDeleteAdju
   );
 }
 
-function ReportsView({ activeDate }) {
+function ReportsView({ activeDate, shifts = [] }) {
   const [options, setOptions] = useState(defaultReportOptions);
   const [filters, setFilters] = useState(() => defaultReportFilters(activeDate));
   const [report, setReport] = useState(null);
@@ -1326,6 +1469,146 @@ function ReportsView({ activeDate }) {
           </div>
         </>
       )}
+
+      <SalesReportPanel shifts={shifts} activeDate={activeDate} />
+    </section>
+  );
+}
+
+function SalesReportPanel({ shifts, activeDate }) {
+  const [filters, setFilters] = useState(() => ({ desde: firstDayOfMonth(activeDate), hasta: activeDate }));
+  const sales = useMemo(() => salesEntries(shifts, filters), [shifts, filters]);
+  const total = sales.reduce((sum, sale) => sum + cents(sale.amount), 0);
+  const byDay = groupSalesByDay(sales);
+
+  useEffect(() => {
+    setFilters((current) => current.desde || current.hasta ? current : { desde: firstDayOfMonth(activeDate), hasta: activeDate });
+  }, [activeDate]);
+
+  function setFilter(field, value) {
+    setFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  return (
+    <div className="panel span-12 sales-report">
+      <div className="section-title">
+        <h3>Ventas de patio</h3>
+        <span className="status ok">{money.format(fromCents(total))}</span>
+      </div>
+      <div className="form-grid">
+        <label className="span-field-3">Desde<input type="date" value={filters.desde} onChange={(event) => setFilter('desde', event.target.value)} /></label>
+        <label className="span-field-3">Hasta<input type="date" value={filters.hasta} onChange={(event) => setFilter('hasta', event.target.value)} /></label>
+        <div className="span-field-6 filter-summary"><span className="status info">{sales.length} venta(s)</span></div>
+      </div>
+
+      {!sales.length ? <Empty text="No hay ventas registradas en este rango." /> : (
+        <div className="sales-grid">
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Dia</th><th>Total ventas</th><th>Registros</th></tr></thead>
+              <tbody>
+                {byDay.map((row) => (
+                  <tr key={row.date}>
+                    <td>{row.date}</td>
+                    <td>{money.format(fromCents(row.total))}</td>
+                    <td>{row.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Fecha</th><th>Turno</th><th>Detalle</th><th>Monto</th></tr></thead>
+              <tbody>
+                {sales.map((sale) => (
+                  <tr key={sale.id}>
+                    <td>{sale.date}</td>
+                    <td>{shiftShortName(sale.shiftName)}</td>
+                    <td>{sale.reason || 'Venta de patio'}</td>
+                    <td>{money.format(num(sale.amount))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MaterialsAuditView({ compras }) {
+  const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
+  const [rows, setRows] = useState(() => [newMaterialAuditRow()]);
+  const calculatedRows = rows.map(calculateMaterialAuditRow);
+  const totals = calculatedRows.reduce((acc, row) => ({
+    expected: acc.expected + row.expected,
+    reported: acc.reported + row.reported,
+    diff: acc.diff + row.diff
+  }), { expected: 0, reported: 0, diff: 0 });
+
+  function updateRow(id, field, value) {
+    setRows((current) => current.map((row) => row.id === id ? { ...row, [field]: value } : row));
+  }
+
+  function addRow() {
+    setRows((current) => [...current, newMaterialAuditRow()]);
+  }
+
+  function removeRow(id) {
+    setRows((current) => current.length === 1 ? current : current.filter((row) => row.id !== id));
+  }
+
+  function clearRows() {
+    setRows([newMaterialAuditRow()]);
+  }
+
+  return (
+    <section className="grid materials-audit">
+      <Metric title="Teorico" value={`${roundWeight(totals.expected).toLocaleString('es-CO')}`} note="Peso esperado segun formula" />
+      <Metric title="Recolector" value={`${roundWeight(totals.reported).toLocaleString('es-CO')}`} note="Peso reportado" />
+      <Metric title="Diferencia" value={`${roundWeight(totals.diff).toLocaleString('es-CO')}`} note={materialDiffNote(totals.diff)} />
+      <Metric title="Materiales" value={rows.length} note="Filas del arqueo" />
+
+      <div className="panel span-12">
+        <div className="section-title">
+          <h3>Arqueo por material</h3>
+          <div className="toolbar">
+            <button className="secondary" type="button" onClick={clearRows}>Limpiar</button>
+            <button className="primary" type="button" onClick={addRow}>Agregar material</button>
+          </div>
+        </div>
+        <datalist id="material-options">
+          {materialOptions.map((material) => <option key={material} value={material} />)}
+        </datalist>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Material</th><th>Tipo</th><th>Inventario sistema</th><th>Recuperado</th><th>Reporte recolector</th><th>Teorico</th><th>Diferencia</th><th></th></tr>
+            </thead>
+            <tbody>
+              {calculatedRows.map((row) => (
+                <tr key={row.id}>
+                  <td><input value={row.material} list="material-options" onChange={(event) => updateRow(row.id, 'material', event.target.value)} placeholder="Material" /></td>
+                  <td>
+                    <select value={row.materialType} onChange={(event) => updateRow(row.id, 'materialType', event.target.value)}>
+                      {materialAuditTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+                    </select>
+                  </td>
+                  <td><input type="number" inputMode="decimal" min="0" step="0.001" value={numberInputValue(row.inventoryWeight)} onChange={(event) => updateRow(row.id, 'inventoryWeight', event.target.value)} placeholder="kg" /></td>
+                  <td><input type="number" inputMode="decimal" min="0" step="0.001" value={numberInputValue(row.recoveredWeight)} onChange={(event) => updateRow(row.id, 'recoveredWeight', event.target.value)} placeholder="kg" /></td>
+                  <td><input type="number" inputMode="decimal" min="0" step="0.001" value={numberInputValue(row.reportedWeight)} onChange={(event) => updateRow(row.id, 'reportedWeight', event.target.value)} placeholder={materialAuditUnit(row.materialType)} /></td>
+                  <td><b>{roundWeight(row.expected).toLocaleString('es-CO')} {materialAuditUnit(row.materialType)}</b></td>
+                  <td><span className={`status ${materialDiffClass(row.diff)}`}>{roundWeight(row.diff).toLocaleString('es-CO')} {materialAuditUnit(row.materialType)}</span></td>
+                  <td><button className="icon-btn" type="button" title="Eliminar" onClick={() => removeRow(row.id)}>x</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="hint">Metales no ferrosos: (inventario kg + recuperado kg) x 2.2 x 1.10. Otros materiales: (inventario + recuperado) x 1.10.</p>
+      </div>
     </section>
   );
 }
@@ -1364,9 +1647,30 @@ function ReportSummaryTable({ rows, columns }) {
   );
 }
 
-function SettingsView({ data, onSave, onImport, onClear }) {
+function SettingsView({ data, onSave, onImport, onClear, onSaveEmployee, onDeleteEmployee }) {
   const [ownerPin, setOwnerPin] = useState(data.ownerPin);
   const [employeePin, setEmployeePin] = useState(data.employeePin);
+  const [employeeForm, setEmployeeForm] = useState(emptyEmployeeForm());
+
+  function setEmployeeField(field, value) {
+    setEmployeeForm((current) => ({ ...current, [field]: value }));
+  }
+
+  async function submitEmployee(event) {
+    event.preventDefault();
+    const saved = await onSaveEmployee(employeeForm);
+    if (saved) setEmployeeForm(emptyEmployeeForm());
+  }
+
+  function editEmployee(employee) {
+    setEmployeeForm({
+      id: employee.id,
+      fullName: employee.fullName,
+      cedula: employee.cedula,
+      phone: employee.phone
+    });
+  }
+
   return (
     <section className="grid">
       <div className="panel span-6">
@@ -1390,6 +1694,42 @@ function SettingsView({ data, onSave, onImport, onClear }) {
         </div>
         <p className="hint">Registros guardados: {data.shifts.length}</p>
       </div>
+      <div className="panel span-12">
+        <div className="section-title"><h3>Empleados</h3><span className="status info">{(data.employees || []).length} registrados</span></div>
+        <form className="form-grid" onSubmit={submitEmployee}>
+          <label className="span-field-4">Nombre completo
+            <input value={employeeForm.fullName} onChange={(event) => setEmployeeField('fullName', event.target.value)} placeholder="Nombre y apellido" required />
+          </label>
+          <label className="span-field-4">Numero de cedula
+            <input value={employeeForm.cedula} onChange={(event) => setEmployeeField('cedula', event.target.value)} placeholder="Cedula" required />
+          </label>
+          <label className="span-field-4">Telefono
+            <input value={employeeForm.phone} onChange={(event) => setEmployeeField('phone', event.target.value)} placeholder="Telefono" required />
+          </label>
+          <div className="span-field-12 report-actions">
+            <button className="primary">{employeeForm.id ? 'Actualizar empleado' : 'Registrar empleado'}</button>
+            {employeeForm.id && <button type="button" className="secondary" onClick={() => setEmployeeForm(emptyEmployeeForm())}>Cancelar edicion</button>}
+          </div>
+        </form>
+
+        {(data.employees || []).length > 0 && (
+          <div className="table-wrap settings-table">
+            <table>
+              <thead><tr><th>Empleado</th><th>Cedula</th><th>Telefono</th><th></th></tr></thead>
+              <tbody>
+                {data.employees.map((employee) => (
+                  <tr key={employee.id}>
+                    <td><b>{employee.fullName}</b></td>
+                    <td>{employee.cedula}</td>
+                    <td>{employee.phone}</td>
+                    <td><RowActions onEdit={() => editEmployee(employee)} onDelete={() => onDeleteEmployee(employee.id)} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -1402,9 +1742,9 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
   useEffect(() => {
     const next = { ...form };
     if (!form.id) next.openingCash = automatic;
-    if (!form.id && syncedPurchases > 0) next.purchaseTotal = syncedPurchases;
+    if ((!ownerUnlocked || !form.id) && syncedPurchases > 0) next.purchaseTotal = syncedPurchases;
     if (next.openingCash !== form.openingCash || next.purchaseTotal !== form.purchaseTotal) onChange(next);
-  }, [form.date, form.shiftName, syncedPurchases]);
+  }, [form.date, form.shiftName, syncedPurchases, ownerUnlocked]);
 
   function setField(field, value) {
     onChange({ ...form, [field]: value });
@@ -1428,7 +1768,7 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
           </label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.openingCash)} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
-          {ownerUnlocked && <label className="span-field-4">Total compras reciclaje<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.purchaseTotal)} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>}
+          <label className="span-field-4">Total compras reciclaje<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.purchaseTotal)} readOnly={!ownerUnlocked} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<input value="Cierre de caja" readOnly /></label>
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
@@ -1456,9 +1796,22 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
   );
 }
 
-function MovementModal({ form, onClose, onChange, onSubmit }) {
+function MovementModal({ form, employees = [], onClose, onChange, onSubmit }) {
+  const selectedBeneficiaryId = form.beneficiaryId || employeeIdByName(employees, form.beneficiaryName);
+  const legacyBeneficiaryValue = form.beneficiaryName && !selectedBeneficiaryId ? `legacy:${form.beneficiaryName}` : '';
+
   function setField(field, value) {
     onChange({ ...form, [field]: value });
+  }
+
+  function setBeneficiary(value) {
+    if (value.startsWith('legacy:')) {
+      onChange({ ...form, beneficiaryId: '', beneficiaryName: value.replace('legacy:', '') });
+      return;
+    }
+
+    const employee = findEmployeeById(employees, value);
+    onChange({ ...form, beneficiaryId: value, beneficiaryName: employee?.fullName || '' });
   }
 
   return (
@@ -1477,11 +1830,34 @@ function MovementModal({ form, onClose, onChange, onSubmit }) {
               <select value={form.shiftName} onChange={(event) => setField('shiftName', event.target.value)} required>{shiftOptions.map((shift) => <option key={shift} value={shift}>{shiftShortName(shift)}</option>)}</select>
             )}
           </label>
-          <label className="span-field-3">Tipo<select value={form.type} onChange={(event) => setField('type', event.target.value)} required><option value="ingreso">Ingreso</option><option value="gasto">Gasto</option><option value="vale">Vale / adelanto</option><option value="retiro">Retiro / entrega al dueno</option></select></label>
+          {form.type === 'ingreso' ? (
+            <label className="span-field-3">Tipo de ingreso
+              <select value={form.incomeType || 'general'} onChange={(event) => setField('incomeType', event.target.value)} required>
+                {incomeTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+              </select>
+            </label>
+          ) : form.type === 'vale' ? (
+            <label className="span-field-3">Tipo<input value="Vale / adelanto" readOnly /></label>
+          ) : (
+            <label className="span-field-3">Tipo
+              <select value={form.type} onChange={(event) => setField('type', event.target.value)} required>
+                {expenseTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+              </select>
+            </label>
+          )}
           <label className="span-field-3">Monto<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.amount)} onChange={(event) => setField('amount', event.target.value)} required /></label>
           <label className="span-field-4">Registrado por<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
-          {form.type === 'vale' && <label className="span-field-4">Empleado que recibe el vale<input value={form.beneficiaryName} onChange={(event) => setField('beneficiaryName', event.target.value)} placeholder="Nombre del empleado" required /></label>}
-          <label className={form.type === 'vale' ? 'span-field-8' : 'span-field-8'}>Motivo<input value={form.reason} onChange={(event) => setField('reason', event.target.value)} placeholder={form.type === 'vale' ? 'Ej: adelanto de sueldo' : 'Ej: almuerzos, transporte, venta, ajuste'} required={form.type !== 'vale'} /></label>
+          {form.type === 'vale' && (
+            <label className="span-field-4">Empleado que recibe el vale
+              <select value={selectedBeneficiaryId || legacyBeneficiaryValue} onChange={(event) => setBeneficiary(event.target.value)} required>
+                <option value="">Selecciona empleado</option>
+                {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.fullName}</option>)}
+                {legacyBeneficiaryValue && <option value={legacyBeneficiaryValue}>{form.beneficiaryName}</option>}
+              </select>
+              {!employees.length && <small>Primero registra empleados en Configuracion.</small>}
+            </label>
+          )}
+          <label className={form.type === 'vale' ? 'span-field-8' : 'span-field-8'}>Motivo<input value={form.reason} onChange={(event) => setField('reason', event.target.value)} placeholder={form.type === 'vale' ? 'Ej: adelanto de sueldo' : form.incomeType === 'ventas' ? 'Ej: venta de patio' : 'Ej: almuerzos, transporte, ajuste'} required={form.type !== 'vale'} /></label>
         </div>
         <div className="modal-foot">
           <button type="button" className="secondary" onClick={onClose}>Cancelar</button>
@@ -1570,7 +1946,8 @@ function normalizeData(value) {
     ownerPin: value?.ownerPin || value?.pin || defaultData.ownerPin,
     employeePin: value?.employeePin || defaultData.employeePin,
     shifts: Array.isArray(value?.shifts) ? value.shifts : [],
-    payrollAdjustments: Array.isArray(value?.payrollAdjustments) ? value.payrollAdjustments : []
+    payrollAdjustments: Array.isArray(value?.payrollAdjustments) ? value.payrollAdjustments : [],
+    employees: Array.isArray(value?.employees) ? value.employees.map(normalizeEmployee).filter((employee) => employee.fullName) : []
   };
 }
 
@@ -1657,8 +2034,10 @@ function openMovementForm(shifts, activeDate, id, movementType, fallbackName, fo
     shiftName: movement?.shiftName || forcedShiftName || 'Turno dia',
     lockShift,
     type: movement?.type || movementType || 'gasto',
+    incomeType: movement?.incomeType || 'general',
     amount: movement?.amount ?? '',
     employeeName: movement?.employeeName || fallbackName || '',
+    beneficiaryId: movement?.beneficiaryId || '',
     beneficiaryName: movement?.beneficiaryName || '',
     reason: movement?.reason || ''
   };
@@ -1725,6 +2104,10 @@ function fromCents(value) {
   return value / 100;
 }
 
+function roundWeight(value) {
+  return Math.round(num(value) * 1000) / 1000;
+}
+
 function cashLeft(denoms, otherCashAmount = 0) {
   return Object.entries(denoms || {}).reduce((sum, [denom, count]) => sum + cents(denom) * num(count), cents(otherCashAmount));
 }
@@ -1764,6 +2147,12 @@ function previousDate(date) {
   return value.toISOString().slice(0, 10);
 }
 
+function nextDate(date) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + 1);
+  return value.toISOString().slice(0, 10);
+}
+
 function previousShift(shifts, date, shiftName) {
   if (shiftName === 'Turno noche') return findShift(shifts, date, 'Turno dia');
   return findShift(shifts, previousDate(date), 'Turno noche');
@@ -1771,6 +2160,21 @@ function previousShift(shifts, date, shiftName) {
 
 function autoOpeningCash(shifts, date, shiftName) {
   return fromCents(shiftCashLeft(previousShift(shifts, date, shiftName)));
+}
+
+function nextShiftKey(date, shiftName) {
+  if (shiftName === 'Turno dia') return { date, shiftName: 'Turno noche' };
+  return { date: nextDate(date), shiftName: 'Turno dia' };
+}
+
+function cascadeOpeningCash(shifts, changedShift) {
+  const nextKey = nextShiftKey(changedShift.date, changedShift.shiftName);
+  const next = findShift(shifts, nextKey.date, nextKey.shiftName);
+  if (!next) return shifts;
+
+  const openingCash = fromCents(shiftCashLeft(changedShift));
+  if (Math.abs(num(next.openingCash) - openingCash) < 0.005) return shifts;
+  return upsert(shifts, { ...next, openingCash, savedAt: new Date().toISOString() });
 }
 
 function purchaseTotalForShift(compras, shiftName) {
@@ -1794,8 +2198,12 @@ function shiftShortName(shiftName) {
   return shiftName === 'Turno noche' ? 'NOCTURNA' : 'DIURNA';
 }
 
-function movementTypeLabel(type) {
-  if (type === 'ingreso') return 'Ingreso';
+function movementLabel(movement) {
+  return movementTypeLabel(movement.type, movement.incomeType);
+}
+
+function movementTypeLabel(type, incomeType = 'general') {
+  if (type === 'ingreso') return incomeType === 'ventas' ? 'Ventas' : 'Ingreso';
   if (type === 'retiro') return 'Retiro';
   if (type === 'vale') return 'Vale';
   return 'Gasto';
@@ -1818,11 +2226,225 @@ function dateInRange(date, desde, hasta) {
   return true;
 }
 
-function payrollEmployees(shifts = [], adjustments = []) {
-  return sortedUnique([
+function shiftMovementEntries(shifts = []) {
+  return shifts.flatMap((shift) => (shift.movements || []).map((movement) => ({
+    ...movement,
+    date: shift.date,
+    shiftName: shift.shiftName,
+    shiftId: shift.id
+  })));
+}
+
+function salesEntries(shifts = [], filters = {}) {
+  return shiftMovementEntries(shifts)
+    .filter((movement) => movement.type === 'ingreso' && movement.incomeType === 'ventas')
+    .filter((movement) => dateInRange(movement.date, filters.desde, filters.hasta))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.shiftName.localeCompare(b.shiftName));
+}
+
+function groupSalesByDay(sales = []) {
+  const rows = new Map();
+  sales.forEach((sale) => {
+    const current = rows.get(sale.date) || { date: sale.date, total: 0, count: 0 };
+    current.total += cents(sale.amount);
+    current.count += 1;
+    rows.set(sale.date, current);
+  });
+  return [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function materialOptionsFromCompras(compras = defaultCompras) {
+  const fromOptions = compras?.opciones?.materiales || [];
+  const fromEntries = (compras?.compras || []).map((compra) => compra.material);
+  return sortedUnique([...fromOptions, ...fromEntries]);
+}
+
+function newMaterialAuditRow() {
+  return {
+    id: uid(),
+    material: '',
+    materialType: 'nonFerrous',
+    inventoryWeight: '',
+    recoveredWeight: '',
+    reportedWeight: ''
+  };
+}
+
+function calculateMaterialAuditRow(row) {
+  const base = num(row.inventoryWeight) + num(row.recoveredWeight);
+  const converted = row.materialType === 'nonFerrous' ? base * 2.2 : base;
+  const expected = converted * 1.10;
+  const reported = num(row.reportedWeight);
+  return {
+    ...row,
+    expected,
+    reported,
+    diff: reported - expected
+  };
+}
+
+function materialAuditUnit(materialType) {
+  return materialAuditTypes.find((type) => type.value === materialType)?.reportUnit || 'kg';
+}
+
+function materialDiffClass(diff) {
+  if (Math.abs(diff) < 1) return 'ok';
+  return diff > 0 ? 'warn' : 'bad';
+}
+
+function materialDiffNote(diff) {
+  if (Math.abs(diff) < 1) return 'Cuadra';
+  return diff > 0 ? 'Sobra peso' : 'Falta peso';
+}
+
+function downloadOwnerSummaryImage({ shifts = [], compras = defaultCompras, activeDate, shiftFilter }) {
+  const movements = shiftMovementEntries(shifts);
+  const incomeMovements = movements.filter((movement) => movement.type === 'ingreso');
+  const expenseMovements = movements.filter((movement) => movement.type !== 'ingreso');
+  const width = 1200;
+  const height = Math.max(900, 620 + (shifts.length * 90) + (movements.length * 34));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const purchases = compras.cantidadRegistros
+    ? cents(shiftFilter ? purchaseTotalForShift(compras, shiftFilter) : num(compras.totalDiario))
+    : shifts.reduce((sum, shift) => sum + cents(shift.purchaseTotal), 0);
+  const incomes = incomeMovements.reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const expenses = expenseMovements.filter((movement) => movement.type === 'gasto' || movement.type === 'retiro').reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const vales = expenseMovements.filter((movement) => movement.type === 'vale').reduce((sum, movement) => sum + cents(movement.amount), 0);
+  const left = shifts.reduce((sum, shift) => sum + shiftCashLeft(shift), 0);
+  const diff = shifts.reduce((sum, shift) => sum + shiftDiff(shift), 0);
+
+  ctx.fillStyle = '#f5f8f6';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#173324';
+  ctx.fillRect(0, 0, width, 130);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 42px Arial';
+  ctx.fillText(companyInfo.name, 44, 58);
+  ctx.font = '700 24px Arial';
+  ctx.fillText('Cuadre de caja', 44, 96);
+  ctx.font = '18px Arial';
+  ctx.fillText(`${activeDate} - ${shiftFilter ? shiftShortName(shiftFilter) : 'Dia completo'}`, 850, 58);
+  ctx.fillText(`Generado ${dateText(new Date().toISOString())}`, 850, 92);
+
+  const cards = [
+    ['Compras', purchases],
+    ['Ingresos', incomes],
+    ['Gastos/retiros', expenses],
+    ['Vales', vales],
+    ['Efectivo dejado', left],
+    [diffText(diff), Math.abs(diff)]
+  ];
+  let y = 164;
+  cards.forEach((card, index) => {
+    const x = 44 + (index % 3) * 370;
+    const cardY = y + Math.floor(index / 3) * 112;
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, x, cardY, 330, 84, 10);
+    ctx.fill();
+    ctx.fillStyle = '#66746c';
+    ctx.font = '700 16px Arial';
+    ctx.fillText(card[0], x + 18, cardY + 28);
+    ctx.fillStyle = index === 5 && diff < -99 ? '#a92b22' : '#173324';
+    ctx.font = '700 30px Arial';
+    ctx.fillText(money.format(fromCents(card[1])), x + 18, cardY + 66);
+  });
+
+  y += 250;
+  ctx.fillStyle = '#16201a';
+  ctx.font = '700 24px Arial';
+  ctx.fillText('Turnos', 44, y);
+  y += 28;
+  shifts.forEach((shift) => {
+    const totals = movementTotals(shift);
+    const expected = expectedLeft(shift);
+    const cash = shiftCashLeft(shift);
+    const shiftDifference = shiftDiff(shift);
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, 44, y, 1112, 72, 8);
+    ctx.fill();
+    ctx.fillStyle = '#16201a';
+    ctx.font = '700 18px Arial';
+    ctx.fillText(`${shiftShortName(shift.shiftName)} - ${shift.employeeName || 'Sin empleado'}`, 62, y + 26);
+    ctx.font = '15px Arial';
+    ctx.fillStyle = '#66746c';
+    ctx.fillText(`Inicial ${money.format(num(shift.openingCash))} | Compras ${money.format(num(shift.purchaseTotal))} | Ingresos ${money.format(fromCents(totals.ingreso))} | Salidas ${money.format(fromCents(totals.gasto + totals.retiro + totals.vale))}`, 62, y + 50);
+    ctx.fillStyle = diffClass(shiftDifference) === 'bad' ? '#a92b22' : '#206b46';
+    ctx.font = '700 17px Arial';
+    ctx.fillText(`Esperado ${money.format(fromCents(expected))} | Dejado ${money.format(fromCents(cash))} | ${diffText(shiftDifference)} ${money.format(Math.abs(fromCents(shiftDifference)))}`, 690, y + 38);
+    y += 88;
+  });
+
+  y += 14;
+  y = drawMovementGroup(ctx, 'Ingresos y ventas', incomeMovements, y);
+  y = drawMovementGroup(ctx, 'Gastos, retiros y vales', expenseMovements, y + 22);
+
+  const link = document.createElement('a');
+  link.href = canvas.toDataURL('image/png');
+  link.download = `cuadre-caja-${activeDate}-${shiftFilter ? shiftShortName(shiftFilter).toLowerCase() : 'dia-completo'}.png`;
+  link.click();
+}
+
+function drawMovementGroup(ctx, title, movements, y) {
+  ctx.fillStyle = '#16201a';
+  ctx.font = '700 24px Arial';
+  ctx.fillText(title, 44, y);
+  y += 30;
+
+  if (!movements.length) {
+    ctx.fillStyle = '#66746c';
+    ctx.font = '16px Arial';
+    ctx.fillText('Sin registros.', 62, y + 18);
+    return y + 42;
+  }
+
+  movements.forEach((movement) => {
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, 44, y, 1112, 28, 6);
+    ctx.fill();
+    ctx.fillStyle = '#16201a';
+    ctx.font = '15px Arial';
+    ctx.fillText(`${shiftShortName(movement.shiftName)} | ${movementLabel(movement)} | ${movement.beneficiaryName ? `${movement.beneficiaryName}: ` : ''}${movement.reason || '-'}`, 60, y + 19);
+    ctx.font = '700 15px Arial';
+    ctx.fillText(money.format(num(movement.amount)), 1040, y + 19);
+    y += 34;
+  });
+  return y;
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function payrollEmployeeChoices(employees = [], shifts = [], adjustments = []) {
+  const registered = employees.map(normalizeEmployee).filter((employee) => employee.fullName);
+  const registeredNames = new Set(registered.map((employee) => normalizeText(employee.fullName)));
+  const historicNames = sortedUnique([
     ...payrollValeEntries(shifts, {}).map((vale) => vale.employeeName),
     ...adjustments.map((item) => item.employeeName)
   ].filter(Boolean));
+  const historic = historicNames
+    .filter((name) => !registeredNames.has(normalizeText(name)))
+    .map((name, index) => ({
+      id: employeeKey({ fullName: name }, index),
+      fullName: name,
+      cedula: '',
+      phone: ''
+    }));
+
+  return [...registered, ...historic].sort((a, b) => a.fullName.localeCompare(b.fullName));
 }
 
 function payrollValeEntries(shifts = [], filters = {}) {
@@ -1849,22 +2471,27 @@ function payrollAdjustmentEntries(adjustments = [], filters = {}) {
     .sort((a, b) => a.date.localeCompare(b.date) || a.employeeName.localeCompare(b.employeeName));
 }
 
-function payrollSummaries(vales = [], adjustments = []) {
+function payrollSummaries(vales = [], adjustments = [], employees = [], filters = {}) {
   const rows = new Map();
 
-  function rowFor(employeeName) {
+  function rowFor(employeeName, employee = null) {
     const cleanName = cleanEmployeeName(employeeName);
-    if (!rows.has(cleanName)) rows.set(cleanName, { employeeName: cleanName, vales: 0, additions: 0, deductions: 0, net: 0 });
+    if (!rows.has(cleanName)) rows.set(cleanName, { employeeName: cleanName, employee, vales: 0, additions: 0, deductions: 0, net: 0 });
+    if (employee && !rows.get(cleanName).employee) rows.get(cleanName).employee = employee;
     return rows.get(cleanName);
   }
 
+  employees
+    .filter((employee) => !filters.employeeName || normalizeText(employee.fullName) === normalizeText(filters.employeeName))
+    .forEach((employee) => rowFor(employee.fullName, employee));
+
   vales.forEach((vale) => {
-    const row = rowFor(vale.employeeName);
+    const row = rowFor(vale.employeeName, findEmployeeByName(employees, vale.employeeName));
     row.vales += cents(vale.amount);
   });
 
   adjustments.forEach((item) => {
-    const row = rowFor(item.employeeName);
+    const row = rowFor(item.employeeName, findEmployeeByName(employees, item.employeeName));
     const amount = cents(item.amount);
     if (payrollAdjustmentMeta(item.type).sign > 0) row.additions += amount;
     else row.deductions += amount;
@@ -1887,6 +2514,156 @@ function payrollNetNote(value) {
 
 function cleanEmployeeName(value) {
   return String(value || '').trim() || 'Sin empleado';
+}
+
+function emptyEmployeeForm() {
+  return { id: '', fullName: '', cedula: '', phone: '' };
+}
+
+function normalizeEmployee(employee, index = 0) {
+  const fullName = String(employee?.fullName || employee?.name || employee?.employeeName || '').trim();
+  const cedula = String(employee?.cedula || employee?.document || '').trim();
+  const phone = String(employee?.phone || employee?.telefono || '').trim();
+  return {
+    id: employee?.id || employeeKey({ fullName, cedula, phone }, index),
+    fullName,
+    cedula,
+    phone,
+    savedAt: employee?.savedAt || ''
+  };
+}
+
+function employeeKey(employee, index = 0) {
+  const name = normalizeText(employee?.fullName).replace(/\s+/g, '-');
+  const cedula = String(employee?.cedula || '').replace(/\D/g, '');
+  return `employee-${cedula || name || index}`;
+}
+
+function findEmployeeById(employees = [], id) {
+  return employees.map(normalizeEmployee).find((employee) => employee.id === id) || null;
+}
+
+function findEmployeeByName(employees = [], name) {
+  return employees.map(normalizeEmployee).find((employee) => normalizeText(employee.fullName) === normalizeText(name)) || null;
+}
+
+function employeeIdByName(employees = [], name) {
+  return findEmployeeByName(employees, name)?.id || '';
+}
+
+function employeeFromForm(employees = [], id, name) {
+  if (id) return findEmployeeById(employees, id) || { id, fullName: String(name || '').trim(), cedula: '', phone: '' };
+  const byName = findEmployeeByName(employees, name);
+  return byName || { id: '', fullName: String(name || '').trim(), cedula: '', phone: '' };
+}
+
+function generatePayrollRole(row, filters, baseSalary, vales = [], adjustments = []) {
+  const base = cents(baseSalary);
+  const total = base + row.net;
+  const employee = row.employee || { fullName: row.employeeName, cedula: '', phone: '' };
+  const additions = adjustments.filter((item) => payrollAdjustmentMeta(item.type).sign > 0);
+  const deductions = adjustments.filter((item) => payrollAdjustmentMeta(item.type).sign < 0);
+  const payrollWindow = window.open('', '_blank');
+  const logoSrc = absoluteAssetUrl(logoUrl);
+
+  if (!payrollWindow) {
+    alert('El navegador bloqueo la ventana del rol de pago.');
+    return;
+  }
+
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Rol de pago - ${escapeHtml(employee.fullName)}</title>
+  <style>
+    body { margin: 0; padding: 32px; font-family: Arial, sans-serif; color: #1f2a24; background: #f4f7f5; }
+    .sheet { max-width: 820px; margin: 0 auto; background: #fff; border: 1px solid #d8e1dc; padding: 28px; }
+    .head { display: flex; justify-content: space-between; gap: 20px; border-bottom: 3px solid #173324; padding-bottom: 18px; }
+    .logo { width: 116px; height: 76px; border: 2px solid #173324; display: grid; place-items: center; background: #fff; padding: 6px; }
+    .logo img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 26px; }
+    h2 { margin-top: 24px; font-size: 18px; }
+    .muted { color: #65736b; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; margin-top: 18px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { text-align: left; border-bottom: 1px solid #d8e1dc; padding: 10px; }
+    th { background: #f5f8f6; color: #65736b; font-size: 12px; text-transform: uppercase; }
+    .total { margin-top: 20px; padding: 16px; background: #e2f2e8; display: flex; justify-content: space-between; font-size: 20px; font-weight: 900; }
+    .sign { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 70px; }
+    .line { border-top: 1px solid #1f2a24; padding-top: 8px; text-align: center; }
+    .actions { margin: 18px auto; max-width: 820px; text-align: right; }
+    button { background: #206b46; color: #fff; border: 0; padding: 10px 14px; border-radius: 8px; font-weight: 800; cursor: pointer; }
+    @media print { body { background: #fff; padding: 0; } .sheet { border: 0; } .actions { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="actions"><button onclick="window.print()">Imprimir / guardar PDF</button></div>
+  <main class="sheet">
+    <section class="head">
+      <div>
+        <h1>Rol de pago</h1>
+        <p class="muted">${escapeHtml(filters.desde)} a ${escapeHtml(filters.hasta)}</p>
+      </div>
+      <div class="logo"><img src="${escapeHtml(logoSrc)}" alt="${escapeHtml(companyInfo.name)}" /></div>
+      <div>
+        <p><b>Empresa:</b> ${escapeHtml(companyInfo.name)}</p>
+        <p><b>RUC:</b> ${escapeHtml(companyInfo.ruc)}</p>
+      </div>
+    </section>
+    <section class="grid">
+      <p><b>Empleado:</b> ${escapeHtml(employee.fullName)}</p>
+      <p><b>Cedula:</b> ${escapeHtml(employee.cedula || 'No registrada')}</p>
+      <p><b>Telefono:</b> ${escapeHtml(employee.phone || 'No registrado')}</p>
+      <p><b>Generado:</b> ${escapeHtml(dateText(new Date().toISOString()))}</p>
+    </section>
+    <h2>Ingresos</h2>
+    <table>
+      <thead><tr><th>Concepto</th><th>Fecha</th><th>Valor</th></tr></thead>
+      <tbody>
+        <tr><td>Sueldo base</td><td>${escapeHtml(filters.desde)} a ${escapeHtml(filters.hasta)}</td><td>${money.format(fromCents(base))}</td></tr>
+        ${additions.map((item) => `<tr><td>${escapeHtml(payrollAdjustmentMeta(item.type).label)} ${escapeHtml(item.note || '')}</td><td>${escapeHtml(item.date)}</td><td>${money.format(num(item.amount))}</td></tr>`).join('')}
+      </tbody>
+    </table>
+    <h2>Descuentos</h2>
+    <table>
+      <thead><tr><th>Concepto</th><th>Fecha</th><th>Valor</th></tr></thead>
+      <tbody>
+        ${vales.map((vale) => `<tr><td>Vale - ${escapeHtml(vale.reason || 'Adelanto de sueldo')}</td><td>${escapeHtml(vale.date)}</td><td>${money.format(num(vale.amount))}</td></tr>`).join('')}
+        ${deductions.map((item) => `<tr><td>${escapeHtml(payrollAdjustmentMeta(item.type).label)} ${escapeHtml(item.note || '')}</td><td>${escapeHtml(item.date)}</td><td>${money.format(num(item.amount))}</td></tr>`).join('')}
+        ${!vales.length && !deductions.length ? '<tr><td colspan="3">Sin descuentos registrados.</td></tr>' : ''}
+      </tbody>
+    </table>
+    <div class="total"><span>Total a recibir</span><span>${money.format(fromCents(total))}</span></div>
+    <section class="sign">
+      <div class="line">Recibi conforme</div>
+      <div class="line">Autorizado por ${escapeHtml(companyInfo.name)}</div>
+    </section>
+  </main>
+</body>
+</html>`;
+
+  payrollWindow.document.open();
+  payrollWindow.document.write(html);
+  payrollWindow.document.close();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function absoluteAssetUrl(path) {
+  try {
+    return new URL(path, window.location.origin).href;
+  } catch (_error) {
+    return path;
+  }
 }
 
 function sortedUnique(values) {

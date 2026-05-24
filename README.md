@@ -14,6 +14,27 @@ En Windows tambien puedes usar `abrir_app.bat`; abre la API de compras y luego l
 
 Para que la sincronizacion MySQL -> Firestore arranque sola al encender el PC, ejecuta `instalar_sincronizacion_inicio.bat`. Esto crea una tarea de Windows que inicia el backend al entrar a tu usuario. El backend sincroniza una vez al arrancar y luego cada `SYNC_INTERVAL_SECONDS` segundos. Para desactivarlo, ejecuta `quitar_sincronizacion_inicio.bat`.
 
+## Mover la sincronizacion MySQL a otro PC
+
+Solo una computadora debe tener activa la sincronizacion MySQL -> Firestore. La app web puede seguir publicada en la red, pero el backend local que lee MySQL debe quedar encendido en el PC que estara prendido todo el dia.
+
+En el PC nuevo:
+
+1. Copia esta carpeta completa del proyecto.
+2. Copia tambien el archivo `.env` y la credencial de Firebase usada por el backend, por ejemplo `almetales-eadf3-firebase-adminsdk-fbsvc-59d6d2cb48.json`.
+3. Instala Node.js si ese PC no lo tiene.
+4. Abre una terminal dentro de la carpeta y ejecuta `npm install`.
+5. Prueba la sincronizacion con `iniciar_sincronizacion_mysql.bat`.
+6. Confirma que responde `http://localhost:4000/health` y revisa `logs\sincronizacion-mysql.log`.
+7. Cuando ya funcione, ejecuta `instalar_sincronizacion_inicio.bat` para que arranque sola al iniciar Windows.
+
+En tu PC actual:
+
+1. Ejecuta `quitar_sincronizacion_inicio.bat`.
+2. Abre el Programador de tareas de Windows y confirma que no exista `Arqueo Recicladora - Sincronizar compras`.
+3. Si todavia hay un proceso `node.exe` corriendo `backend\server.js`, cierralo desde el Administrador de tareas o reinicia el PC.
+4. Verifica desde la app, entrando como dueno, que las compras sigan actualizandose desde el PC nuevo antes de apagar tu computadora.
+
 ## Backend Node.js + Express
 
 Copia `.env.example` como `.env` y completa:

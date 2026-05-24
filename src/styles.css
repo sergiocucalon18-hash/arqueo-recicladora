@@ -66,6 +66,15 @@ aside {
   font-weight: 900;
 }
 
+.brand-logo {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: #fff;
+  padding: 4px;
+}
+
 .brand h1 {
   margin: 0;
   font-size: 18px;
@@ -238,6 +247,27 @@ main {
 
 .salaries-view .metric strong {
   font-size: 25px;
+}
+
+.sales-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.settings-table,
+.materials-audit .table-wrap {
+  margin-top: 14px;
+}
+
+.table-input {
+  min-width: 120px;
+}
+
+.materials-audit td input,
+.materials-audit td select {
+  min-width: 150px;
 }
 
 .report-actions {
@@ -571,6 +601,7 @@ tr:last-child td { border-bottom: 0; }
   .nav { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .span-3, .span-6 { grid-column: span 12; }
   .denoms { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sales-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 680px) {
