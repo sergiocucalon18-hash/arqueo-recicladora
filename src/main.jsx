@@ -1542,6 +1542,10 @@ function SalesReportPanel({ shifts, activeDate }) {
 function MaterialsAuditView({ compras, activeDate }) {
   const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
   const [rows, setRows] = useState(() => [newMaterialAuditRow()]);
+  const [lookupFilters, setLookupFilters] = useState({ desde: '', hasta: '', material: '' });
+  const [lookupReport, setLookupReport] = useState(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState('');
   const calculatedRows = rows.map(calculateMaterialAuditRow);
   const reportRows = calculatedRows.filter(materialAuditRowHasData);
   const totals = calculatedRows.reduce((acc, row) => ({
@@ -1562,6 +1566,41 @@ function MaterialsAuditView({ compras, activeDate }) {
     setRows((current) => current.length === 1 ? current : current.filter((row) => row.id !== id));
   }
 
+  function setLookupFilter(field, value) {
+    setLookupFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  async function searchInventory(event) {
+    event.preventDefault();
+    setLookupLoading(true);
+    setLookupError('');
+    setLookupReport(null);
+    try {
+      const report = await fetchMaterialInventoryLookup(lookupFilters);
+      setLookupReport(report);
+    } catch (error) {
+      setLookupError(error.message || 'No se pudo consultar el inventario.');
+    } finally {
+      setLookupLoading(false);
+    }
+  }
+
+  function applyInventoryResult(result) {
+    const material = result.material || '';
+    const inventoryWeight = roundWeight(result.totalPesoKg);
+    setRows((current) => {
+      const sameMaterial = current.find((row) => normalizeText(row.material) === normalizeText(material));
+      const emptyRow = current.find((row) => !materialAuditRowHasData(row));
+      const targetId = sameMaterial?.id || emptyRow?.id;
+
+      if (targetId) {
+        return current.map((row) => row.id === targetId ? { ...row, material, inventoryWeight } : row);
+      }
+
+      return [...current, { ...newMaterialAuditRow(), material, inventoryWeight }];
+    });
+  }
+
   function clearRows() {
     setRows([newMaterialAuditRow()]);
   }
@@ -1573,12 +1612,51 @@ function MaterialsAuditView({ compras, activeDate }) {
       <Metric title="Diferencia" value={`${roundWeight(totals.diff).toLocaleString('es-CO')}`} note={materialDiffNote(totals.diff)} />
       <Metric title="Materiales" value={rows.length} note="Filas del arqueo" />
 
+      <div className="panel span-12 inventory-lookup">
+        <div className="section-title">
+          <h3>Consultar inventario sistema</h3>
+          {lookupReport && <span className="status info">{lookupReport.cantidadRegistros} registro(s)</span>}
+        </div>
+        <form className="form-grid" onSubmit={searchInventory}>
+          <label className="span-field-3">Desde
+            <input type="datetime-local" value={lookupFilters.desde} onChange={(event) => setLookupFilter('desde', event.target.value)} required />
+          </label>
+          <label className="span-field-3">Hasta
+            <input type="datetime-local" value={lookupFilters.hasta} onChange={(event) => setLookupFilter('hasta', event.target.value)} required />
+          </label>
+          <label className="span-field-3">Material
+            <input value={lookupFilters.material} list="material-options" onChange={(event) => setLookupFilter('material', event.target.value)} placeholder="Vacio = todos" />
+          </label>
+          <div className="span-field-3 report-actions">
+            <button className="primary" disabled={lookupLoading}>{lookupLoading ? 'Consultando...' : 'Consultar'}</button>
+            <button className="secondary" type="button" onClick={() => { setLookupFilters({ desde: '', hasta: '', material: '' }); setLookupReport(null); setLookupError(''); }}>Limpiar</button>
+          </div>
+        </form>
+        {lookupError && <p className="error report-error">{lookupError}</p>}
+        {lookupReport && (
+          <div className="table-wrap inventory-results">
+            <table>
+              <thead><tr><th>Material</th><th>Peso inventario kg</th><th>Registros</th><th></th></tr></thead>
+              <tbody>
+                {materialInventoryRows(lookupReport).map((result) => (
+                  <tr key={result.material}>
+                    <td>{result.material}</td>
+                    <td><b>{roundWeight(result.totalPesoKg).toLocaleString('es-CO')} kg</b></td>
+                    <td>{result.cantidadRegistros}</td>
+                    <td><button className="secondary" type="button" onClick={() => applyInventoryResult(result)}>Usar</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       <div className="panel span-12">
         <div className="section-title">
           <h3>Arqueo por material</h3>
           <div className="toolbar">
             <button className="primary" type="button" onClick={() => downloadMaterialAuditImage({ rows: reportRows, totals, activeDate })}>Imagen para jefe</button>
-            <button className="secondary" type="button" onClick={() => shareMaterialAuditReport({ rows: reportRows, totals, activeDate })}>Enviar resumen</button>
             <button className="secondary" type="button" onClick={clearRows}>Limpiar</button>
             <button className="primary" type="button" onClick={addRow}>Agregar material</button>
           </div>
@@ -2315,6 +2393,131 @@ function materialAuditUnit(materialType) {
   return materialAuditTypes.find((type) => type.value === materialType)?.reportUnit || 'kg';
 }
 
+async function fetchMaterialInventoryLookup(filters = {}) {
+  const desde = normalizeLookupDateTime(filters.desde);
+  const hasta = normalizeLookupDateTime(filters.hasta);
+  const material = lookupTrimText(filters.material);
+
+  if (!desde || !hasta) throw new Error('Elige fecha y hora desde y hasta.');
+  if (desde > hasta) throw new Error('La fecha inicial no puede ser mayor que la final.');
+
+  const params = new URLSearchParams({ desde, hasta });
+  if (material) params.set('material', material);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/reporte-compras?${params.toString()}`);
+    const payload = await readJson(response);
+    if (!response.ok) throw new Error(payload?.error || 'No se pudo consultar desde la API.');
+    return payload;
+  } catch (_apiError) {
+    const compras = await loadMaterialInventoryFromFirestore({ desde, hasta, material });
+    return summarizeMaterialInventory(compras, { desde, hasta, material });
+  }
+}
+
+async function loadMaterialInventoryFromFirestore({ desde, hasta, material }) {
+  const dates = lookupDatesBetween(desde.slice(0, 10), hasta.slice(0, 10));
+  if (!dates.length) return [];
+
+  const snapshots = await Promise.all(dates.map((date) => getDoc(doc(db, 'compras_diarias', date))));
+  return snapshots.flatMap((snapshot, index) => {
+    if (!snapshot.exists()) return [];
+    return normalizeCompras(snapshot.data(), dates[index]).compras
+      .map((compra, compraIndex) => normalizeLookupCompra(compra, compraIndex))
+      .filter((compra) => {
+        const dateTime = `${compra.fecha}T${lookupNormalizeTime(compra.hora_registro_salida)}`;
+        if (dateTime < desde || dateTime > hasta) return false;
+        if (material && normalizeText(compra.material) !== normalizeText(material)) return false;
+        return true;
+      });
+  });
+}
+
+function summarizeMaterialInventory(compras = [], filtros = {}) {
+  const totalPesoKg = roundWeight(compras.reduce((sum, compra) => sum + num(compra.peso_neto_kg), 0));
+  const totalSubtotal = lookupRoundMoney(compras.reduce((sum, compra) => sum + num(compra.subtotal), 0));
+  const porMaterial = compras.reduce((acc, compra) => {
+    const name = compra.material || 'Sin material';
+    const current = acc[name] || { nombre: name, totalPesoKg: 0, totalSubtotal: 0, cantidadRegistros: 0 };
+    current.totalPesoKg = roundWeight(current.totalPesoKg + num(compra.peso_neto_kg));
+    current.totalSubtotal = lookupRoundMoney(current.totalSubtotal + num(compra.subtotal));
+    current.cantidadRegistros += 1;
+    acc[name] = current;
+    return acc;
+  }, {});
+
+  return {
+    filtros,
+    totalPesoKg,
+    totalSubtotal,
+    cantidadRegistros: compras.length,
+    porMaterial,
+    compras,
+    generadoEn: new Date().toISOString()
+  };
+}
+
+function materialInventoryRows(report) {
+  return Object.values(report?.porMaterial || {})
+    .map((row) => ({
+      material: row.nombre || row.material || 'Sin material',
+      totalPesoKg: num(row.totalPesoKg),
+      cantidadRegistros: Number(row.cantidadRegistros || 0)
+    }))
+    .sort((a, b) => a.material.localeCompare(b.material));
+}
+
+function normalizeLookupCompra(compra, index) {
+  const fecha = String(compra?.fecha || '').slice(0, 10);
+  return {
+    id: compra?.id || `${fecha}-${index}`,
+    fecha,
+    material: lookupTrimText(compra?.material),
+    peso_neto_kg: num(compra?.peso_neto_kg),
+    subtotal: num(compra?.subtotal),
+    hora_registro_salida: lookupNormalizeTime(compra?.hora_registro_salida),
+    jornada: lookupTrimText(compra?.jornada)
+  };
+}
+
+function normalizeLookupDateTime(value) {
+  const text = String(value || '').replace(' ', 'T').trim();
+  if (!text) return '';
+  if (text.length === 10) return `${text}T00:00:00`;
+  if (text.length === 16) return `${text}:00`;
+  return text.slice(0, 19);
+}
+
+function lookupNormalizeTime(value) {
+  const text = String(value || '').trim();
+  if (!text) return '00:00:00';
+  const time = text.includes('T') ? text.slice(11, 19) : text.slice(0, 8);
+  return time.length === 5 ? `${time}:00` : time || '00:00:00';
+}
+
+function lookupTrimText(value) {
+  return String(value || '').trim();
+}
+
+function lookupRoundMoney(value) {
+  return Math.round(num(value) * 100) / 100;
+}
+
+function lookupDatesBetween(startDate, endDate) {
+  const dates = [];
+  const current = new Date(`${startDate}T12:00:00`);
+  const end = new Date(`${endDate}T12:00:00`);
+
+  if (Number.isNaN(current.getTime()) || Number.isNaN(end.getTime()) || current > end) return dates;
+
+  while (current <= end) {
+    dates.push(current.toISOString().slice(0, 10));
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dates;
+}
+
 function materialAuditTypeLabel(materialType) {
   return materialAuditTypes.find((type) => type.value === materialType)?.label || 'Material';
 }
@@ -2346,57 +2549,6 @@ function formatSignedWeight(value) {
   const rounded = roundWeight(num(value));
   if (Math.abs(rounded) < 1) return '0';
   return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('es-CO')}`;
-}
-
-function materialAuditReportText({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate }) {
-  const validRows = rows.filter(materialAuditRowHasData);
-  const lines = [
-    `${companyInfo.name} - ARQUEO DE MATERIALES`,
-    `Fecha: ${activeDate || today()}`,
-    `Materiales en entrega: ${validRows.length}`,
-    `Teorico total: ${formatWeight(totals.expected)}`,
-    `Recolector total: ${formatWeight(totals.reported)}`,
-    `Diferencia total: ${formatSignedWeight(totals.diff)} (${materialDiffNote(totals.diff)})`,
-    '',
-    'DETALLE DE ENTREGA'
-  ];
-
-  validRows.forEach((row, index) => {
-    const unit = materialAuditUnit(row.materialType);
-    lines.push(
-      '',
-      `${index + 1}. ${String(row.material || 'Material sin nombre').trim()}`,
-      `Tipo: ${materialAuditTypeLabel(row.materialType)}`,
-      `Inventario sistema: ${formatWeight(row.inventoryWeight)} kg`,
-      `Recuperado: ${formatWeight(row.recoveredWeight)} kg`,
-      `Teorico: ${formatWeight(row.expected)} ${unit}`,
-      `Reporte recolector: ${formatWeight(row.reported)} ${unit}`,
-      `Diferencia: ${formatSignedWeight(row.diff)} ${unit} (${materialDiffNote(row.diff)})`
-    );
-  });
-
-  lines.push('', 'Formula: no ferrosos = (inventario + recuperado) x 2.2 x 1.10; otros = (inventario + recuperado) x 1.10.');
-  return lines.join('\n');
-}
-
-async function shareMaterialAuditReport({ rows = [], totals, activeDate }) {
-  const validRows = rows.filter(materialAuditRowHasData);
-  if (!validRows.length) {
-    alert('Agrega al menos un material al arqueo para enviar el resumen.');
-    return;
-  }
-
-  const text = materialAuditReportText({ rows: validRows, totals, activeDate });
-  if (navigator.share) {
-    try {
-      await navigator.share({ title: 'Arqueo de materiales', text });
-      return;
-    } catch (error) {
-      if (error?.name === 'AbortError') return;
-    }
-  }
-
-  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
 }
 
 function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate }) {

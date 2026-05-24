@@ -261,6 +261,15 @@ main {
   margin-top: 14px;
 }
 
+.inventory-lookup .report-actions {
+  align-items: flex-end;
+  margin-top: 0;
+}
+
+.inventory-results td:last-child {
+  text-align: right;
+}
+
 .table-input {
   min-width: 120px;
 }
