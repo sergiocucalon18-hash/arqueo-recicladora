@@ -370,6 +370,59 @@ main {
 .delivery-item b.warn { color: #9a6300; }
 .delivery-item b.bad { color: var(--red); }
 
+.audit-meta {
+  margin-bottom: 14px;
+}
+
+.audit-actions {
+  margin-top: 14px;
+}
+
+.material-history-summary {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 14px;
+  margin: 14px 0;
+}
+
+.saved-audit-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.saved-audit-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(140px, auto) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfdfb;
+}
+
+.saved-audit-card div {
+  display: grid;
+  gap: 4px;
+}
+
+.saved-audit-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.utilities-view td input,
+.utilities-view td select {
+  min-width: 110px;
+}
+
+.utility-comparison .status {
+  min-width: 96px;
+  justify-content: center;
+}
+
 .report-actions {
   display: flex;
   gap: 10px;
@@ -749,6 +802,7 @@ tbody tr:hover td { background: #f1f7f3; }
   .sales-grid { grid-template-columns: 1fr; }
   .delivery-item { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .delivery-item > div:first-child { grid-column: 1 / -1; }
+  .saved-audit-card { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 680px) {
@@ -900,7 +954,8 @@ tbody tr:hover td { background: #f1f7f3; }
 
   .materials-audit table,
   .reports-view table,
-  .salaries-view table {
+  .salaries-view table,
+  .utilities-view table {
     min-width: 760px;
   }
 
@@ -927,6 +982,8 @@ tbody tr:hover td { background: #f1f7f3; }
   }
 
   .delivery-item { grid-template-columns: 1fr 1fr; }
+  .material-history-summary { grid-template-columns: 1fr; }
+  .material-history-summary .metric { grid-column: span 1; }
 }
 
 @media print {

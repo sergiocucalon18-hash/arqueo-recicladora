@@ -12,7 +12,7 @@ const SESSION_KEY = 'arqueo-recicladora-session';
 const ACTIVE_CASH_BOX_KEY = 'almetales-active-cash-box';
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const denominations = [20, 10, 5, 1, 0.5, 0.25, 0.1, 0.05];
-const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], payrollAdjustments: [], employees: [], updatedAt: '' };
+const defaultData = { ownerPin: '1234', employeePin: 'empleado', shifts: [], payrollAdjustments: [], employees: [], materialAudits: [], updatedAt: '' };
 const defaultCompras = { fecha: '', totalDiario: 0, totalPesoKg: 0, cantidadRegistros: 0, porJornada: {}, compras: [], opciones: null, actualizadoEn: '' };
 const defaultReportOptions = { materiales: [], jornadas: ['DIURNA', 'NOCTURNA'] };
 const shiftOptions = ['Turno dia', 'Turno noche'];
@@ -154,6 +154,7 @@ function App() {
     salaries: ['Sueldo Empleados', 'Vales, bonos, extras y descuentos por rango de fechas.'],
     reports: ['Reporte General', 'Consulta compras por material, jornada, dia completo o rangos de fecha y hora.'],
     materials: ['Arqueo Materiales', 'Compara inventario, recuperacion y peso reportado por recolector.'],
+    utilities: ['Utilidades', 'Compara compras pagadas, entregas vendidas y utilidad por material.'],
     settings: ['Configuracion', 'Claves, respaldo, importacion y limpieza de datos.']
   };
 
@@ -367,6 +368,17 @@ function App() {
     await persist({ ...data, employees: (data.employees || []).filter((employee) => employee.id !== id) });
   }
 
+  async function saveMaterialAudit(audit) {
+    if (!ownerUnlocked) return false;
+    await persist({ ...data, materialAudits: upsert(data.materialAudits || [], audit) });
+    return true;
+  }
+
+  async function deleteMaterialAudit(id) {
+    if (!ownerUnlocked || !confirm('Eliminar este arqueo guardado?')) return;
+    await persist({ ...data, materialAudits: (data.materialAudits || []).filter((audit) => audit.id !== id) });
+  }
+
   async function deletePayrollAdjustment(id) {
     if (!ownerUnlocked || !confirm('Eliminar este movimiento de sueldo?')) return;
     await persist({ ...data, payrollAdjustments: (data.payrollAdjustments || []).filter((item) => item.id !== id) });
@@ -453,6 +465,7 @@ function App() {
           {ownerUnlocked && <button className={activeView === 'salaries' ? 'active' : ''} onClick={() => setActiveView('salaries')}>Sueldo Empleados</button>}
           {ownerUnlocked && <button className={activeView === 'reports' ? 'active' : ''} onClick={() => setActiveView('reports')}>Reporte General</button>}
           {ownerUnlocked && <button className={activeView === 'materials' ? 'active' : ''} onClick={() => setActiveView('materials')}>Arqueo Materiales</button>}
+          {ownerUnlocked && <button className={activeView === 'utilities' ? 'active' : ''} onClick={() => setActiveView('utilities')}>Utilidades</button>}
           {ownerUnlocked && <button className={activeView === 'settings' ? 'active' : ''} onClick={() => setActiveView('settings')}>Configuracion</button>}
         </nav>
 
@@ -536,7 +549,17 @@ function App() {
         )}
 
         {activeView === 'materials' && ownerUnlocked && (
-            <MaterialsAuditView compras={comprasDiarias} activeDate={activeDate} />
+          <MaterialsAuditView
+            compras={comprasDiarias}
+            activeDate={activeDate}
+            savedAudits={data.materialAudits}
+            onSaveAudit={saveMaterialAudit}
+            onDeleteAudit={deleteMaterialAudit}
+          />
+        )}
+
+        {activeView === 'utilities' && ownerUnlocked && (
+          <UtilitiesView activeDate={activeDate} />
         )}
 
         {activeView === 'settings' && ownerUnlocked && (
@@ -1544,20 +1567,29 @@ function SalesReportPanel({ shifts, activeDate }) {
   );
 }
 
-function MaterialsAuditView({ compras, activeDate }) {
+function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit, onDeleteAudit }) {
   const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
   const [rows, setRows] = useState(() => [newMaterialAuditRow()]);
+  const [auditDate, setAuditDate] = useState(activeDate || today());
+  const [auditTitle, setAuditTitle] = useState('');
   const [lookupFilters, setLookupFilters] = useState({ desde: '', hasta: '', material: '' });
+  const [historyFilters, setHistoryFilters] = useState(() => ({ desde: firstDayOfMonth(activeDate || today()), hasta: activeDate || today(), material: '' }));
   const [lookupReport, setLookupReport] = useState(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState('');
   const calculatedRows = rows.map(calculateMaterialAuditRow);
   const reportRows = calculatedRows.filter(materialAuditRowHasData);
+  const savedReport = filterMaterialAudits(savedAudits, historyFilters);
   const totals = calculatedRows.reduce((acc, row) => ({
     expected: acc.expected + row.expected,
     reported: acc.reported + row.reported,
     diff: acc.diff + row.diff
   }), { expected: 0, reported: 0, diff: 0 });
+
+  useEffect(() => {
+    setAuditDate((current) => current || activeDate || today());
+    setHistoryFilters((current) => current.desde || current.hasta ? current : { desde: firstDayOfMonth(activeDate || today()), hasta: activeDate || today(), material: '' });
+  }, [activeDate]);
 
   function updateRow(id, field, value) {
     setRows((current) => current.map((row) => row.id === id ? { ...row, [field]: value } : row));
@@ -1608,6 +1640,32 @@ function MaterialsAuditView({ compras, activeDate }) {
 
   function clearRows() {
     setRows([newMaterialAuditRow()]);
+  }
+
+  async function saveCurrentAudit() {
+    if (!reportRows.length) {
+      alert('Agrega al menos un material para guardar el arqueo.');
+      return;
+    }
+
+    const saved = await onSaveAudit(buildMaterialAuditPayload({
+      date: auditDate || activeDate || today(),
+      title: auditTitle,
+      rows: reportRows,
+      totals
+    }));
+
+    if (saved) alert('Arqueo guardado.');
+  }
+
+  function loadAudit(audit) {
+    setRows((audit.rows || []).map((row) => ({ ...newMaterialAuditRow(), ...row, id: uid() })));
+    setAuditDate(audit.date || activeDate || today());
+    setAuditTitle(audit.title || '');
+  }
+
+  function setHistoryFilter(field, value) {
+    setHistoryFilters((current) => ({ ...current, [field]: value }));
   }
 
   return (
@@ -1664,10 +1722,18 @@ function MaterialsAuditView({ compras, activeDate }) {
         <div className="section-title">
           <h3>Arqueo por material</h3>
           <div className="toolbar">
-            <button className="primary" type="button" onClick={() => downloadMaterialAuditImage({ rows: reportRows, totals, activeDate })}>Imagen para jefe</button>
+            <button className="primary" type="button" onClick={() => downloadMaterialAuditImage({ rows: reportRows, totals, activeDate: auditDate || activeDate, title: auditTitle })}>Imagen para jefe</button>
             <button className="secondary" type="button" onClick={clearRows}>Limpiar</button>
             <button className="primary" type="button" onClick={addRow}>Agregar material</button>
           </div>
+        </div>
+        <div className="form-grid audit-meta">
+          <label className="span-field-3">Fecha del arqueo
+            <input type="date" value={auditDate} onChange={(event) => setAuditDate(event.target.value)} />
+          </label>
+          <label className="span-field-9">Nombre o detalle de entrega
+            <input value={auditTitle} onChange={(event) => setAuditTitle(event.target.value)} placeholder="Ej: entrega metales camion tarde" />
+          </label>
         </div>
         <datalist id="material-options">
           {materialOptions.map((material) => <option key={material} value={material} />)}
@@ -1698,6 +1764,10 @@ function MaterialsAuditView({ compras, activeDate }) {
           </table>
         </div>
         <p className="hint">Metales no ferrosos: (inventario kg + recuperado kg) x 2.2 x 1.10. Otros materiales: (inventario + recuperado) x 1.10.</p>
+        <div className="report-actions audit-actions">
+          <button className="primary" type="button" onClick={saveCurrentAudit}>Guardar arqueo</button>
+          <span className="hint">Se guardan materiales, teorico, recolector, faltante o sobrante para revisarlo despues.</span>
+        </div>
       </div>
 
       <div className="panel span-12 material-delivery-summary">
@@ -1720,6 +1790,216 @@ function MaterialsAuditView({ compras, activeDate }) {
                 <div><span>Diferencia</span><b className={materialDiffClass(row.diff)}>{formatSignedWeight(row.diff)} {materialAuditUnit(row.materialType)}</b></div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      <div className="panel span-12 material-audit-history">
+        <div className="section-title">
+          <h3>Arqueos guardados</h3>
+          <span className="status info">{savedReport.audits.length} arqueo(s)</span>
+        </div>
+        <div className="form-grid">
+          <label className="span-field-3">Desde<input type="date" value={historyFilters.desde} onChange={(event) => setHistoryFilter('desde', event.target.value)} /></label>
+          <label className="span-field-3">Hasta<input type="date" value={historyFilters.hasta} onChange={(event) => setHistoryFilter('hasta', event.target.value)} /></label>
+          <label className="span-field-3">Material<input value={historyFilters.material} list="material-options" onChange={(event) => setHistoryFilter('material', event.target.value)} placeholder="Todos" /></label>
+          <div className="span-field-3 filter-summary"><span className={`status ${materialDiffClass(savedReport.totals.diff)}`}>{materialDiffNote(savedReport.totals.diff)} {formatSignedWeight(savedReport.totals.diff)}</span></div>
+        </div>
+
+        {!savedReport.audits.length ? <Empty text="No hay arqueos guardados para estos filtros." /> : (
+          <>
+            <div className="material-history-summary">
+              <Metric title="Teorico guardado" value={formatWeight(savedReport.totals.expected)} note="Peso esperado" />
+              <Metric title="Recolector guardado" value={formatWeight(savedReport.totals.reported)} note="Peso reportado" />
+              <Metric title="Diferencia neta" value={formatSignedWeight(savedReport.totals.diff)} note={materialDiffNote(savedReport.totals.diff)} />
+              <Metric title="Materiales" value={savedReport.materialRows.length} note="Con movimiento" />
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Material</th><th>Teorico</th><th>Recolector</th><th>Diferencia</th><th>Arqueos</th></tr></thead>
+                <tbody>
+                  {savedReport.materialRows.map((row) => (
+                    <tr key={row.material}>
+                      <td><b>{row.material}</b></td>
+                      <td>{formatWeight(row.expected)}</td>
+                      <td>{formatWeight(row.reported)}</td>
+                      <td><span className={`status ${materialDiffClass(row.diff)}`}>{formatSignedWeight(row.diff)}</span></td>
+                      <td>{row.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="saved-audit-list">
+              {savedReport.audits.map((audit) => (
+                <div className="saved-audit-card" key={audit.id}>
+                  <div>
+                    <b>{audit.title || 'Arqueo sin nombre'}</b>
+                    <span>{audit.date} - {audit.rows?.length || 0} material(es)</span>
+                  </div>
+                  <div><span>Diferencia</span><b className={materialDiffClass(audit.totals?.diff)}>{formatSignedWeight(audit.totals?.diff)}</b></div>
+                  <div className="toolbar">
+                    <button className="secondary" type="button" onClick={() => loadAudit(audit)}>Cargar</button>
+                    <button className="danger" type="button" onClick={() => onDeleteAudit(audit.id)}>Eliminar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function UtilitiesView({ activeDate }) {
+  const [filters, setFilters] = useState(() => defaultUtilityFilters(activeDate));
+  const [report, setReport] = useState(null);
+  const [deliveries, setDeliveries] = useState(() => [newUtilityDeliveryRow()]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const purchaseRows = useMemo(() => utilityPurchaseRows(report), [report]);
+  const utilityRows = useMemo(() => calculateUtilityRows(deliveries, purchaseRows), [deliveries, purchaseRows]);
+  const totals = utilityTotals(purchaseRows, utilityRows);
+  const materialOptions = sortedUnique([...purchaseRows.map((row) => row.material), ...deliveries.map((row) => row.material)].filter(Boolean));
+
+  useEffect(() => {
+    setFilters((current) => current.desde || current.hasta ? current : defaultUtilityFilters(activeDate));
+  }, [activeDate]);
+
+  function setFilter(field, value) {
+    setFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateDelivery(id, field, value) {
+    setDeliveries((current) => current.map((row) => row.id === id ? { ...row, [field]: value } : row));
+  }
+
+  function addDelivery() {
+    setDeliveries((current) => [...current, newUtilityDeliveryRow()]);
+  }
+
+  function removeDelivery(id) {
+    setDeliveries((current) => current.length === 1 ? current : current.filter((row) => row.id !== id));
+  }
+
+  async function loadPurchases(event) {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const payload = await fetchMaterialInventoryLookup({ desde: filters.desde, hasta: filters.hasta, material: '' });
+      setReport(payload);
+    } catch (currentError) {
+      setError(currentError.message || 'No se pudo generar utilidades.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="grid utilities-view">
+      <div className="panel span-12">
+        <div className="section-title">
+          <h3>Filtro de compras para utilidad</h3>
+          <div className="toolbar">
+            <button className="primary" type="button" onClick={() => downloadUtilityImage({ filters, purchaseRows, utilityRows, totals })}>Imagen para jefe</button>
+          </div>
+        </div>
+        <form className="form-grid" onSubmit={loadPurchases}>
+          <label className="span-field-4">Desde<input type="datetime-local" value={filters.desde} onChange={(event) => setFilter('desde', event.target.value)} required /></label>
+          <label className="span-field-4">Hasta<input type="datetime-local" value={filters.hasta} onChange={(event) => setFilter('hasta', event.target.value)} required /></label>
+          <div className="span-field-4 report-actions">
+            <button className="primary" disabled={loading}>{loading ? 'Calculando...' : 'Relistar materiales comprados'}</button>
+          </div>
+        </form>
+        {error && <p className="error report-error">{error}</p>}
+      </div>
+
+      <Metric title="Total pagado" value={money.format(totals.paid)} note="Compras del rango" />
+      <Metric title="Valor venta" value={money.format(totals.sale)} note="Entregas registradas" />
+      <Metric title="Costo aplicado" value={money.format(totals.appliedCost)} note="Promedio por kg" />
+      <Metric title="Utilidad" value={money.format(totals.profit)} note={utilityProfitNote(totals.profit)} />
+
+      <div className="panel span-6">
+        <div className="section-title">
+          <h3>Materiales comprados</h3>
+          <span className="status info">{purchaseRows.length} material(es)</span>
+        </div>
+        {!purchaseRows.length ? <Empty text="Elige un rango y relista los materiales comprados." /> : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Material</th><th>Peso kg</th><th>Total pagado</th><th>Promedio kg</th></tr></thead>
+              <tbody>
+                {purchaseRows.map((row) => (
+                  <tr key={row.material}>
+                    <td><b>{row.material}</b></td>
+                    <td>{formatWeight(row.totalPesoKg)}</td>
+                    <td>{money.format(num(row.totalPaid))}</td>
+                    <td>{money.format(num(row.avgCostKg))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="panel span-6">
+        <div className="section-title">
+          <h3>Entrega y venta</h3>
+          <button className="primary" type="button" onClick={addDelivery}>Agregar entrega</button>
+        </div>
+        <datalist id="utility-material-options">
+          {materialOptions.map((material) => <option key={material} value={material} />)}
+        </datalist>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Material</th><th>Cantidad</th><th>Unidad</th><th>Venta</th><th>Utilidad</th><th></th></tr></thead>
+            <tbody>
+              {utilityRows.map((row) => (
+                <tr key={row.id}>
+                  <td><input value={row.material} list="utility-material-options" onChange={(event) => updateDelivery(row.id, 'material', event.target.value)} placeholder="Material" /></td>
+                  <td><input type="number" inputMode="decimal" min="0" step="0.001" value={numberInputValue(row.quantity)} onChange={(event) => updateDelivery(row.id, 'quantity', event.target.value)} placeholder="0" /></td>
+                  <td>
+                    <select value={row.unit} onChange={(event) => updateDelivery(row.id, 'unit', event.target.value)}>
+                      <option value="kg">kg</option>
+                      <option value="lb">lb</option>
+                    </select>
+                  </td>
+                  <td><input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(row.saleValue)} onChange={(event) => updateDelivery(row.id, 'saleValue', event.target.value)} placeholder="0.00" /></td>
+                  <td><span className={`status ${row.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(row.profit)}</span></td>
+                  <td><button className="icon-btn" type="button" title="Eliminar" onClick={() => removeDelivery(row.id)}>x</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="hint">La utilidad usa el costo promedio por kg comprado: valor de venta menos costo aplicado al peso entregado. Si registras libras, se convierten a kg dividiendo para 2.2.</p>
+      </div>
+
+      <div className="panel span-12 utility-comparison">
+        <div className="section-title">
+          <h3>Comparacion de utilidad</h3>
+          <span className={`status ${totals.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(totals.profit)}</span>
+        </div>
+        {!utilityRows.some(utilityDeliveryHasData) ? <Empty text="Agrega materiales entregados y valor de venta para calcular utilidad." /> : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Material</th><th>Entregado kg</th><th>Venta</th><th>Costo aplicado</th><th>Utilidad</th><th>Margen</th></tr></thead>
+              <tbody>
+                {utilityRows.filter(utilityDeliveryHasData).map((row) => (
+                  <tr key={row.id}>
+                    <td><b>{row.material || 'Sin material'}</b></td>
+                    <td>{formatWeight(row.deliveredKg)}</td>
+                    <td>{money.format(row.sale)}</td>
+                    <td>{money.format(row.appliedCost)}</td>
+                    <td><span className={`status ${row.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(row.profit)}</span></td>
+                    <td>{Number.isFinite(row.margin) ? `${roundWeight(row.margin).toLocaleString('es-CO')}%` : '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
@@ -2062,7 +2342,8 @@ function normalizeData(value) {
     employeePin: value?.employeePin || defaultData.employeePin,
     shifts: Array.isArray(value?.shifts) ? value.shifts : [],
     payrollAdjustments: Array.isArray(value?.payrollAdjustments) ? value.payrollAdjustments : [],
-    employees: Array.isArray(value?.employees) ? value.employees.map(normalizeEmployee).filter((employee) => employee.fullName) : []
+    employees: Array.isArray(value?.employees) ? value.employees.map(normalizeEmployee).filter((employee) => employee.fullName) : [],
+    materialAudits: Array.isArray(value?.materialAudits) ? value.materialAudits.map(normalizeMaterialAudit).filter((audit) => audit.rows.length) : []
   };
 }
 
@@ -2476,6 +2757,170 @@ function materialInventoryRows(report) {
     .sort((a, b) => a.material.localeCompare(b.material));
 }
 
+function normalizeMaterialAudit(audit, index = 0) {
+  const rows = Array.isArray(audit?.rows) ? audit.rows.map((row, rowIndex) => normalizeMaterialAuditRow(row, rowIndex)).filter(materialAuditRowHasData) : [];
+  const totals = rows.reduce((acc, row) => ({
+    expected: acc.expected + num(row.expected),
+    reported: acc.reported + num(row.reported),
+    diff: acc.diff + num(row.diff)
+  }), { expected: 0, reported: 0, diff: 0 });
+
+  return {
+    id: audit?.id || `audit-${audit?.date || today()}-${index}`,
+    date: audit?.date || today(),
+    title: String(audit?.title || '').trim(),
+    rows,
+    totals: audit?.totals ? {
+      expected: num(audit.totals.expected),
+      reported: num(audit.totals.reported),
+      diff: num(audit.totals.diff)
+    } : totals,
+    savedAt: audit?.savedAt || ''
+  };
+}
+
+function normalizeMaterialAuditRow(row, index = 0) {
+  const materialType = materialAuditTypes.some((type) => type.value === row?.materialType) ? row.materialType : 'nonFerrous';
+  const calculated = calculateMaterialAuditRow({
+    id: row?.id || `audit-row-${index}`,
+    material: String(row?.material || '').trim(),
+    materialType,
+    inventoryWeight: num(row?.inventoryWeight),
+    recoveredWeight: num(row?.recoveredWeight),
+    reportedWeight: num(row?.reportedWeight)
+  });
+  return {
+    ...calculated,
+    expected: num(row?.expected ?? calculated.expected),
+    reported: num(row?.reported ?? calculated.reported),
+    diff: num(row?.diff ?? calculated.diff)
+  };
+}
+
+function buildMaterialAuditPayload({ date, title, rows, totals }) {
+  const cleanRows = rows.map((row, index) => normalizeMaterialAuditRow({ ...row, id: `row-${index + 1}` }, index));
+  return {
+    id: uid(),
+    date,
+    title: String(title || '').trim() || `Arqueo ${date}`,
+    rows: cleanRows,
+    totals: {
+      expected: roundWeight(totals.expected),
+      reported: roundWeight(totals.reported),
+      diff: roundWeight(totals.diff)
+    },
+    savedAt: new Date().toISOString()
+  };
+}
+
+function filterMaterialAudits(audits = [], filters = {}) {
+  const filteredAudits = audits
+    .map(normalizeMaterialAudit)
+    .filter((audit) => dateInRange(audit.date, filters.desde, filters.hasta))
+    .map((audit) => {
+      const rows = audit.rows.filter((row) => !filters.material || normalizeText(row.material) === normalizeText(filters.material));
+      const totals = rows.reduce((acc, row) => ({
+        expected: acc.expected + num(row.expected),
+        reported: acc.reported + num(row.reported),
+        diff: acc.diff + num(row.diff)
+      }), { expected: 0, reported: 0, diff: 0 });
+      return { ...audit, rows, totals };
+    })
+    .filter((audit) => audit.rows.length)
+    .sort((a, b) => b.date.localeCompare(a.date) || String(b.savedAt || '').localeCompare(String(a.savedAt || '')));
+
+  const materialMap = new Map();
+  filteredAudits.forEach((audit) => {
+    audit.rows.forEach((row) => {
+      const material = row.material || 'Sin material';
+      const current = materialMap.get(material) || { material, expected: 0, reported: 0, diff: 0, count: 0 };
+      current.expected += num(row.expected);
+      current.reported += num(row.reported);
+      current.diff += num(row.diff);
+      current.count += 1;
+      materialMap.set(material, current);
+    });
+  });
+
+  const totals = filteredAudits.reduce((acc, audit) => ({
+    expected: acc.expected + num(audit.totals.expected),
+    reported: acc.reported + num(audit.totals.reported),
+    diff: acc.diff + num(audit.totals.diff)
+  }), { expected: 0, reported: 0, diff: 0 });
+
+  return {
+    audits: filteredAudits,
+    materialRows: [...materialMap.values()].sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff)),
+    totals
+  };
+}
+
+function defaultUtilityFilters(date = today()) {
+  return {
+    desde: `${date}T00:00`,
+    hasta: `${date}T23:59`
+  };
+}
+
+function newUtilityDeliveryRow() {
+  return { id: uid(), material: '', quantity: '', unit: 'kg', saleValue: '' };
+}
+
+function utilityPurchaseRows(report) {
+  return Object.values(report?.porMaterial || {})
+    .map((row) => {
+      const totalPesoKg = num(row.totalPesoKg);
+      const totalPaid = num(row.totalSubtotal);
+      return {
+        material: row.nombre || row.material || 'Sin material',
+        totalPesoKg,
+        totalPaid,
+        avgCostKg: totalPesoKg > 0 ? totalPaid / totalPesoKg : 0
+      };
+    })
+    .sort((a, b) => a.material.localeCompare(b.material));
+}
+
+function calculateUtilityRows(deliveries = [], purchaseRows = []) {
+  return deliveries.map((row) => {
+    const purchase = purchaseRows.find((item) => normalizeText(item.material) === normalizeText(row.material));
+    const quantity = num(row.quantity);
+    const deliveredKg = row.unit === 'lb' ? quantity / 2.2 : quantity;
+    const sale = num(row.saleValue);
+    const appliedCost = deliveredKg * num(purchase?.avgCostKg);
+    const profit = sale - appliedCost;
+    const margin = sale > 0 ? (profit / sale) * 100 : NaN;
+    return {
+      ...row,
+      deliveredKg,
+      sale,
+      appliedCost,
+      profit,
+      margin,
+      purchase
+    };
+  });
+}
+
+function utilityTotals(purchaseRows = [], utilityRows = []) {
+  return {
+    paid: purchaseRows.reduce((sum, row) => sum + num(row.totalPaid), 0),
+    sale: utilityRows.reduce((sum, row) => sum + num(row.sale), 0),
+    appliedCost: utilityRows.reduce((sum, row) => sum + num(row.appliedCost), 0),
+    profit: utilityRows.reduce((sum, row) => sum + num(row.profit), 0)
+  };
+}
+
+function utilityDeliveryHasData(row) {
+  return Boolean(String(row.material || '').trim() || num(row.quantity) > 0 || num(row.saleValue) > 0);
+}
+
+function utilityProfitNote(value) {
+  if (num(value) > 0) return 'Ganancia';
+  if (num(value) < 0) return 'Perdida';
+  return 'Sin diferencia';
+}
+
 function normalizeLookupCompra(compra, index) {
   const fecha = String(compra?.fecha || '').slice(0, 10);
   return {
@@ -2560,7 +3005,7 @@ function formatSignedWeight(value) {
   return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('es-CO')}`;
 }
 
-function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate }) {
+function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reported: 0, diff: 0 }, activeDate, title = '' }) {
   const validRows = rows.filter(materialAuditRowHasData);
   if (!validRows.length) {
     alert('Agrega al menos un material al arqueo para generar la imagen.');
@@ -2586,6 +3031,10 @@ function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reporte
   ctx.font = '18px Arial';
   ctx.fillText(`Fecha ${activeDate || today()}`, 890, 58);
   ctx.fillText(`${validRows.length} material(es)`, 890, 92);
+  if (title) {
+    ctx.font = '16px Arial';
+    drawFittedText(ctx, title, 44, 122, 760);
+  }
 
   const cards = [
     ['Teorico total', formatWeight(totals.expected)],
@@ -2643,6 +3092,118 @@ function downloadMaterialAuditImage({ rows = [], totals = { expected: 0, reporte
   const link = document.createElement('a');
   link.href = canvas.toDataURL('image/png');
   link.download = `arqueo-materiales-${activeDate || today()}.png`;
+  link.click();
+}
+
+function downloadUtilityImage({ filters, purchaseRows = [], utilityRows = [], totals = { paid: 0, sale: 0, appliedCost: 0, profit: 0 } }) {
+  const validPurchases = purchaseRows.filter((row) => num(row.totalPaid) > 0 || num(row.totalPesoKg) > 0);
+  const validUtilities = utilityRows.filter(utilityDeliveryHasData);
+  if (!validPurchases.length && !validUtilities.length) {
+    alert('Genera compras o agrega entregas para crear la imagen de utilidades.');
+    return;
+  }
+
+  const width = 1200;
+  const height = Math.max(860, 480 + (validPurchases.length * 34) + (validUtilities.length * 76));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#f5f8f6';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#173324';
+  ctx.fillRect(0, 0, width, 132);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '700 42px Arial';
+  ctx.fillText(companyInfo.name, 44, 58);
+  ctx.font = '700 24px Arial';
+  ctx.fillText('Reporte de utilidades por material', 44, 98);
+  ctx.font = '18px Arial';
+  ctx.fillText(`${dateText(filters.desde)} a ${dateText(filters.hasta)}`, 760, 58);
+  ctx.fillText(`Generado ${dateText(new Date().toISOString())}`, 760, 92);
+
+  const cards = [
+    ['Total pagado', money.format(totals.paid)],
+    ['Valor venta', money.format(totals.sale)],
+    ['Costo aplicado', money.format(totals.appliedCost)],
+    [utilityProfitNote(totals.profit), money.format(totals.profit)]
+  ];
+  let y = 164;
+  cards.forEach((card, index) => {
+    const x = 44 + index * 278;
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, x, y, 254, 86, 10);
+    ctx.fill();
+    ctx.fillStyle = '#66746c';
+    ctx.font = '700 16px Arial';
+    ctx.fillText(card[0], x + 18, y + 30);
+    ctx.fillStyle = index === 3 && totals.profit < 0 ? '#a92b22' : '#173324';
+    ctx.font = '700 27px Arial';
+    ctx.fillText(card[1], x + 18, y + 68);
+  });
+
+  y += 138;
+  ctx.fillStyle = '#16201a';
+  ctx.font = '700 23px Arial';
+  ctx.fillText('Compras pagadas por material', 44, y);
+  y += 28;
+  if (!validPurchases.length) {
+    ctx.fillStyle = '#66746c';
+    ctx.font = '16px Arial';
+    ctx.fillText('Sin compras cargadas para el rango.', 62, y + 18);
+    y += 46;
+  } else {
+    validPurchases.forEach((row) => {
+      ctx.fillStyle = '#ffffff';
+      roundRect(ctx, 44, y, 1112, 28, 6);
+      ctx.fill();
+      ctx.fillStyle = '#16201a';
+      ctx.font = '15px Arial';
+      drawFittedText(ctx, row.material, 60, y + 19, 430);
+      ctx.fillText(`${formatWeight(row.totalPesoKg)} kg`, 520, y + 19);
+      ctx.fillText(`Pagado ${money.format(row.totalPaid)}`, 700, y + 19);
+      ctx.fillText(`Prom/kg ${money.format(row.avgCostKg)}`, 920, y + 19);
+      y += 34;
+    });
+  }
+
+  y += 22;
+  ctx.fillStyle = '#16201a';
+  ctx.font = '700 23px Arial';
+  ctx.fillText('Entrega, venta y utilidad', 44, y);
+  y += 28;
+  if (!validUtilities.length) {
+    ctx.fillStyle = '#66746c';
+    ctx.font = '16px Arial';
+    ctx.fillText('Sin entregas registradas.', 62, y + 18);
+  } else {
+    validUtilities.forEach((row, index) => {
+      ctx.fillStyle = '#ffffff';
+      roundRect(ctx, 44, y, 1112, 62, 8);
+      ctx.fill();
+      ctx.fillStyle = '#16201a';
+      ctx.font = '700 17px Arial';
+      drawFittedText(ctx, `${index + 1}. ${row.material || 'Sin material'}`, 62, y + 25, 420);
+      ctx.font = '15px Arial';
+      ctx.fillStyle = '#66746c';
+      ctx.fillText(`Entregado ${formatWeight(row.deliveredKg)} kg`, 62, y + 48);
+      ctx.fillStyle = '#16201a';
+      ctx.font = '700 15px Arial';
+      ctx.fillText(`Venta ${money.format(row.sale)}`, 520, y + 25);
+      ctx.fillText(`Costo ${money.format(row.appliedCost)}`, 700, y + 25);
+      ctx.fillStyle = row.profit >= 0 ? '#206b46' : '#a92b22';
+      ctx.fillText(`Utilidad ${money.format(row.profit)}`, 890, y + 25);
+      ctx.fillStyle = '#66746c';
+      ctx.font = '14px Arial';
+      ctx.fillText(`Margen ${Number.isFinite(row.margin) ? `${roundWeight(row.margin).toLocaleString('es-CO')}%` : '-'}`, 890, y + 48);
+      y += 76;
+    });
+  }
+
+  const link = document.createElement('a');
+  link.href = canvas.toDataURL('image/png');
+  link.download = `utilidades-${String(filters.desde || today()).slice(0, 10)}-${String(filters.hasta || today()).slice(0, 10)}.png`;
   link.click();
 }
 
