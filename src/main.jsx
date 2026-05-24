@@ -559,7 +559,7 @@ function App() {
         )}
 
         {activeView === 'utilities' && ownerUnlocked && (
-          <UtilitiesView activeDate={activeDate} />
+          <UtilitiesView activeDate={activeDate} compras={comprasDiarias} savedAudits={data.materialAudits} />
         )}
 
         {activeView === 'settings' && ownerUnlocked && (
@@ -1751,7 +1751,12 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
             <tbody>
               {calculatedRows.map((row) => (
                 <tr key={row.id}>
-                  <td><input value={row.material} list="material-options" onChange={(event) => updateRow(row.id, 'material', event.target.value)} placeholder="Material" /></td>
+                  <td>
+                    <select value={row.material} onChange={(event) => updateRow(row.id, 'material', event.target.value)}>
+                      <option value="">Selecciona material</option>
+                      {materialOptions.map((material) => <option key={material} value={material}>{material}</option>)}
+                    </select>
+                  </td>
                   <td>
                     <select value={row.materialType} onChange={(event) => updateRow(row.id, 'materialType', event.target.value)}>
                       {materialAuditTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
@@ -1858,16 +1863,20 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
   );
 }
 
-function UtilitiesView({ activeDate }) {
+function UtilitiesView({ activeDate, compras = defaultCompras, savedAudits = [] }) {
   const [filters, setFilters] = useState(() => defaultUtilityFilters(activeDate));
   const [report, setReport] = useState(null);
-  const [deliveries, setDeliveries] = useState(() => [newUtilityDeliveryRow()]);
+  const [saleValues, setSaleValues] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
+  const auditDeliveries = useMemo(() => utilityDeliveriesFromAudits(savedAudits, filters, materialOptions), [savedAudits, filters, materialOptions]);
   const purchaseRows = useMemo(() => utilityPurchaseRows(report), [report]);
-  const utilityRows = useMemo(() => calculateUtilityRows(deliveries, purchaseRows), [deliveries, purchaseRows]);
+  const utilityRows = useMemo(() => calculateUtilityRows(
+    auditDeliveries.map((row) => ({ ...row, saleValue: saleValues[row.key] ?? '' })),
+    purchaseRows
+  ), [auditDeliveries, purchaseRows, saleValues]);
   const totals = utilityTotals(purchaseRows, utilityRows);
-  const materialOptions = sortedUnique([...purchaseRows.map((row) => row.material), ...deliveries.map((row) => row.material)].filter(Boolean));
 
   useEffect(() => {
     setFilters((current) => current.desde || current.hasta ? current : defaultUtilityFilters(activeDate));
@@ -1877,16 +1886,8 @@ function UtilitiesView({ activeDate }) {
     setFilters((current) => ({ ...current, [field]: value }));
   }
 
-  function updateDelivery(id, field, value) {
-    setDeliveries((current) => current.map((row) => row.id === id ? { ...row, [field]: value } : row));
-  }
-
-  function addDelivery() {
-    setDeliveries((current) => [...current, newUtilityDeliveryRow()]);
-  }
-
-  function removeDelivery(id) {
-    setDeliveries((current) => current.length === 1 ? current : current.filter((row) => row.id !== id));
+  function updateSaleValue(key, value) {
+    setSaleValues((current) => ({ ...current, [key]: value }));
   }
 
   async function loadPurchases(event) {
@@ -1894,7 +1895,7 @@ function UtilitiesView({ activeDate }) {
     setLoading(true);
     setError('');
     try {
-      const payload = await fetchMaterialInventoryLookup({ desde: filters.desde, hasta: filters.hasta, material: '' });
+      const payload = await fetchMaterialInventoryLookup({ desde: filters.desde, hasta: filters.hasta, material: filters.material });
       setReport(payload);
     } catch (currentError) {
       setError(currentError.message || 'No se pudo generar utilidades.');
@@ -1913,9 +1914,15 @@ function UtilitiesView({ activeDate }) {
           </div>
         </div>
         <form className="form-grid" onSubmit={loadPurchases}>
-          <label className="span-field-4">Desde<input type="datetime-local" value={filters.desde} onChange={(event) => setFilter('desde', event.target.value)} required /></label>
-          <label className="span-field-4">Hasta<input type="datetime-local" value={filters.hasta} onChange={(event) => setFilter('hasta', event.target.value)} required /></label>
-          <div className="span-field-4 report-actions">
+          <label className="span-field-3">Desde<input type="datetime-local" value={filters.desde} onChange={(event) => setFilter('desde', event.target.value)} required /></label>
+          <label className="span-field-3">Hasta<input type="datetime-local" value={filters.hasta} onChange={(event) => setFilter('hasta', event.target.value)} required /></label>
+          <label className="span-field-3">Material
+            <select value={filters.material} onChange={(event) => setFilter('material', event.target.value)}>
+              <option value="">Todos los materiales</option>
+              {materialOptions.map((material) => <option key={material} value={material}>{material}</option>)}
+            </select>
+          </label>
+          <div className="span-field-3 report-actions">
             <button className="primary" disabled={loading}>{loading ? 'Calculando...' : 'Relistar materiales comprados'}</button>
           </div>
         </form>
@@ -1953,35 +1960,28 @@ function UtilitiesView({ activeDate }) {
 
       <div className="panel span-6">
         <div className="section-title">
-          <h3>Entrega y venta</h3>
-          <button className="primary" type="button" onClick={addDelivery}>Agregar entrega</button>
+          <h3>Entregas desde arqueos</h3>
+          <span className="status info">{auditDeliveries.length} material(es)</span>
         </div>
-        <datalist id="utility-material-options">
-          {materialOptions.map((material) => <option key={material} value={material} />)}
-        </datalist>
-        <div className="table-wrap">
-          <table>
-            <thead><tr><th>Material</th><th>Cantidad</th><th>Unidad</th><th>Venta</th><th>Utilidad</th><th></th></tr></thead>
-            <tbody>
-              {utilityRows.map((row) => (
-                <tr key={row.id}>
-                  <td><input value={row.material} list="utility-material-options" onChange={(event) => updateDelivery(row.id, 'material', event.target.value)} placeholder="Material" /></td>
-                  <td><input type="number" inputMode="decimal" min="0" step="0.001" value={numberInputValue(row.quantity)} onChange={(event) => updateDelivery(row.id, 'quantity', event.target.value)} placeholder="0" /></td>
-                  <td>
-                    <select value={row.unit} onChange={(event) => updateDelivery(row.id, 'unit', event.target.value)}>
-                      <option value="kg">kg</option>
-                      <option value="lb">lb</option>
-                    </select>
-                  </td>
-                  <td><input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(row.saleValue)} onChange={(event) => updateDelivery(row.id, 'saleValue', event.target.value)} placeholder="0.00" /></td>
-                  <td><span className={`status ${row.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(row.profit)}</span></td>
-                  <td><button className="icon-btn" type="button" title="Eliminar" onClick={() => removeDelivery(row.id)}>x</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="hint">La utilidad usa el costo promedio por kg comprado: valor de venta menos costo aplicado al peso entregado. Si registras libras, se convierten a kg dividiendo para 2.2.</p>
+        {!auditDeliveries.length ? <Empty text="No hay arqueos de materiales guardados para este rango y material." /> : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Material</th><th>Entregado</th><th>Arqueos</th><th>Valor pagado por venta</th><th>Utilidad</th></tr></thead>
+              <tbody>
+                {utilityRows.map((row) => (
+                  <tr key={row.key}>
+                    <td><b>{row.material}</b></td>
+                    <td>{formatWeight(row.quantity)} {row.unit}</td>
+                    <td>{row.auditCount}</td>
+                    <td><input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(row.saleValue)} onChange={(event) => updateSaleValue(row.key, event.target.value)} placeholder="0.00" /></td>
+                    <td><span className={`status ${row.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(row.profit)}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="hint">Las entregas salen automaticamente de los arqueos guardados en el rango. Tu solo ingresas el valor que te pagaron por cada material.</p>
       </div>
 
       <div className="panel span-12 utility-comparison">
@@ -1989,7 +1989,7 @@ function UtilitiesView({ activeDate }) {
           <h3>Comparacion de utilidad</h3>
           <span className={`status ${totals.profit >= 0 ? 'ok' : 'bad'}`}>{money.format(totals.profit)}</span>
         </div>
-        {!utilityRows.some(utilityDeliveryHasData) ? <Empty text="Agrega materiales entregados y valor de venta para calcular utilidad." /> : (
+        {!utilityRows.some(utilityDeliveryHasData) ? <Empty text="Guarda arqueos de materiales en este rango e ingresa el valor pagado para calcular utilidad." /> : (
           <div className="table-wrap">
             <table>
               <thead><tr><th>Material</th><th>Entregado kg</th><th>Venta</th><th>Costo aplicado</th><th>Utilidad</th><th>Margen</th></tr></thead>
@@ -2168,7 +2168,9 @@ function ShiftModal({ form, ownerUnlocked, shifts, compras, onClose, onChange, o
           </label>
           <label className="span-field-3">Empleado<input value={form.employeeName} onChange={(event) => setField('employeeName', event.target.value)} placeholder="Nombre" /></label>
           <label className="span-field-3">Saldo inicial recibido<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.openingCash)} readOnly={!ownerUnlocked} onChange={(event) => setField('openingCash', event.target.value)} /><small>{ownerUnlocked ? `Puedes corregirlo. Automatico sugerido: ${money.format(automatic)}.` : `Viene del efectivo dejado por el turno anterior: ${money.format(automatic)}.`}</small></label>
-          <label className="span-field-4">Total compras reciclaje<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.purchaseTotal)} readOnly={!ownerUnlocked} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>
+          {ownerUnlocked && (
+            <label className="span-field-4">Total compras reciclaje<input type="number" inputMode="decimal" min="0" step="0.01" value={numberInputValue(form.purchaseTotal)} onChange={(event) => setField('purchaseTotal', event.target.value)} required /><small>{syncedPurchases > 0 ? `Sincronizado para este turno: ${money.format(syncedPurchases)}.` : 'Sin compras sincronizadas para este turno.'}</small></label>
+          )}
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Estado del turno<input value="Cierre de caja" readOnly /></label>
           <label className={ownerUnlocked ? 'span-field-4' : 'span-field-6'}>Notas del cierre<input value={form.notes} onChange={(event) => setField('notes', event.target.value)} placeholder="Observacion final" /></label>
         </div>
@@ -2871,7 +2873,8 @@ function auditMaterialSummary(audit) {
 function defaultUtilityFilters(date = today()) {
   return {
     desde: `${date}T00:00`,
-    hasta: `${date}T23:59`
+    hasta: `${date}T23:59`,
+    material: ''
   };
 }
 
@@ -2892,6 +2895,50 @@ function utilityPurchaseRows(report) {
       };
     })
     .sort((a, b) => a.material.localeCompare(b.material));
+}
+
+function utilityDeliveriesFromAudits(audits = [], filters = {}, validMaterials = []) {
+  const desde = normalizeLookupDateTime(filters.desde);
+  const hasta = normalizeLookupDateTime(filters.hasta);
+  const materialFilter = normalizeText(filters.material);
+  const validMaterialSet = new Set(validMaterials.map(normalizeText).filter(Boolean));
+  const grouped = new Map();
+
+  audits
+    .map(normalizeMaterialAudit)
+    .filter((audit) => materialAuditInUtilityRange(audit, desde, hasta))
+    .forEach((audit) => {
+      audit.rows.forEach((row) => {
+        const material = row.material || 'Sin material';
+        if (validMaterialSet.size && !validMaterialSet.has(normalizeText(material))) return;
+        if (materialFilter && normalizeText(material) !== materialFilter) return;
+
+        const unit = materialAuditUnit(row.materialType);
+        const key = `${normalizeText(material)}-${unit}`;
+        const current = grouped.get(key) || {
+          id: key,
+          key,
+          material,
+          quantity: 0,
+          unit,
+          auditCount: 0,
+          saleValue: ''
+        };
+        current.quantity += num(row.reported);
+        current.auditCount += 1;
+        grouped.set(key, current);
+      });
+    });
+
+  return [...grouped.values()]
+    .map((row) => ({ ...row, quantity: roundWeight(row.quantity) }))
+    .sort((a, b) => a.material.localeCompare(b.material));
+}
+
+function materialAuditInUtilityRange(audit, desde, hasta) {
+  const startDate = desde ? desde.slice(0, 10) : '';
+  const endDate = hasta ? hasta.slice(0, 10) : '';
+  return dateInRange(audit.date, startDate, endDate);
 }
 
 function calculateUtilityRows(deliveries = [], purchaseRows = []) {
