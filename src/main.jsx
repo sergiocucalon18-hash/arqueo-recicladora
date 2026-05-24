@@ -1655,7 +1655,12 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
       totals
     }));
 
-    if (saved) alert('Arqueo guardado.');
+    if (saved) {
+      clearRows();
+      setAuditTitle('');
+      setAuditDate(today());
+      alert('Arqueo guardado. Listo para registrar un nuevo arqueo.');
+    }
   }
 
   function loadAudit(audit) {
