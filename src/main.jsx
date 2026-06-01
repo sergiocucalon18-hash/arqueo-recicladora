@@ -446,6 +446,12 @@ function App() {
     setDeleteUnlocked(true);
   }
 
+  function openOwnerMovement(target) {
+    const movementTypes = ['ingreso', 'ventas', 'gasto', 'retiro', 'vale'];
+    const isType = movementTypes.includes(target);
+    setMovementModal(openMovementForm(data.shifts, activeDate, isType ? null : target, isType ? target : 'gasto', session.name));
+  }
+
   if (!session) return <Login data={data} loading={loading} syncError={syncError} onLogin={login} />;
 
   return (
@@ -528,7 +534,7 @@ function App() {
             onDateChange={setActiveDate}
             onShiftFilterChange={setOwnerShiftFilter}
             onOpenShift={(id) => setShiftModal(openShiftForm(data.shifts, activeDate, id, ownerUnlocked, session.name, comprasDiarias))}
-            onOpenMovement={(id) => setMovementModal(openMovementForm(data.shifts, activeDate, id, 'gasto', session.name))}
+            onOpenMovement={openOwnerMovement}
             onDeleteShift={deleteShift}
             onDeleteMovement={deleteMovement}
           />
@@ -554,6 +560,7 @@ function App() {
             activeDate={activeDate}
             savedAudits={data.materialAudits}
             onSaveAudit={saveMaterialAudit}
+            onUpdateAudit={saveMaterialAudit}
             onDeleteAudit={deleteMaterialAudit}
           />
         )}
@@ -681,7 +688,7 @@ function EmployeeView({ shifts, activeCashBox, deleteUnlocked, onOpenCashBox, on
       </div>
       {activeCashBox && (
         <>
-          <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta caja." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onDelete={onDeleteMovement} />
+          <MovementBox title="Ingresos registrados" total={incomeTotal} status="ok" movements={incomes} emptyText="No hay ingresos registrados para esta caja." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('ingreso')} onAddSale={() => onOpenMovement('ventas')} onDelete={onDeleteMovement} />
           <MovementBox title="Gastos y vales registrados" total={expenseTotal} status="bad" movements={expenses} emptyText="No hay gastos o vales registrados para esta caja." canDelete={deleteUnlocked} onAdd={() => onOpenMovement('gasto')} onAddVale={() => onOpenMovement('vale')} onDelete={onDeleteMovement} />
         </>
       )}
@@ -726,14 +733,15 @@ function CashBoxStarter({ onOpen }) {
   );
 }
 
-function MovementBox({ title, total, status, movements, emptyText, canDelete, onAdd, onAddVale, onDelete }) {
+function MovementBox({ title, total, status, movements, emptyText, canDelete, onAdd, onAddSale, onAddVale, onDelete }) {
   return (
     <div className="panel span-6">
       <div className="section-title">
         <h3>{title}</h3>
         <div className="toolbar">
           <span className={`status ${status}`}>{money.format(fromCents(total))}</span>
-          <button className="primary" onClick={onAdd}>Registrar</button>
+          <button className="primary" onClick={onAdd}>{onAddSale ? 'Ingreso' : 'Registrar'}</button>
+          {onAddSale && <button className="secondary" onClick={onAddSale}>Venta</button>}
           {onAddVale && <button className="secondary" onClick={onAddVale}>Vale</button>}
         </div>
       </div>
@@ -809,7 +817,10 @@ function OwnerView({ shifts, compras, activeDate, shiftFilter, onDateChange, onS
           <h3>Resumen de caja por turno</h3>
           <div className="toolbar no-print">
             <button className="primary" onClick={() => downloadOwnerSummaryImage({ shifts, compras, activeDate, shiftFilter })}>Imagen para jefe</button>
-            <button className="secondary" onClick={() => onOpenMovement(null)}>Agregar movimiento</button>
+            <button className="secondary" onClick={() => onOpenMovement('ingreso')}>Ingreso</button>
+            <button className="secondary" onClick={() => onOpenMovement('ventas')}>Venta</button>
+            <button className="secondary" onClick={() => onOpenMovement('gasto')}>Gasto</button>
+            <button className="secondary" onClick={() => onOpenMovement('vale')}>Vale</button>
             <button className="secondary" onClick={() => onOpenShift(null)}>Agregar cierre</button>
           </div>
         </div>
@@ -1567,7 +1578,7 @@ function SalesReportPanel({ shifts, activeDate }) {
   );
 }
 
-function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit, onDeleteAudit }) {
+function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit, onUpdateAudit, onDeleteAudit }) {
   const materialOptions = useMemo(() => materialOptionsFromCompras(compras), [compras]);
   const [rows, setRows] = useState(() => [newMaterialAuditRow()]);
   const [auditDate, setAuditDate] = useState(activeDate || today());
@@ -1667,6 +1678,16 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
     setRows((audit.rows || []).map((row) => ({ ...newMaterialAuditRow(), ...row, id: uid() })));
     setAuditDate(audit.date || activeDate || today());
     setAuditTitle(audit.title || '');
+  }
+
+  async function setAuditPaymentStatus(audit, paymentStatus) {
+    if (!onUpdateAudit) return;
+    await onUpdateAudit({
+      ...audit,
+      paymentStatus,
+      paidAt: paymentStatus === 'paid' ? new Date().toISOString() : '',
+      updatedAt: new Date().toISOString()
+    });
   }
 
   function setHistoryFilter(field, value) {
@@ -1841,20 +1862,25 @@ function MaterialsAuditView({ compras, activeDate, savedAudits = [], onSaveAudit
               </table>
             </div>
             <div className="saved-audit-list">
-              {savedReport.audits.map((audit) => (
-                <div className="saved-audit-card" key={audit.id}>
+              {savedReport.audits.map((audit) => {
+                const paymentMeta = materialAuditPaymentMeta(audit.paymentStatus);
+                return (
+                <div className={`saved-audit-card ${paymentMeta.cardClass}`} key={audit.id}>
                   <div>
                     <b>{audit.title || 'Arqueo sin nombre'}</b>
                     <span>{audit.date} - {audit.rows?.length || 0} material(es)</span>
                     <span>{auditMaterialSummary(audit)}</span>
                   </div>
+                  <div><span>Estado</span><b className={`status ${paymentMeta.statusClass}`}>{paymentMeta.label}</b></div>
                   <div><span>Diferencia</span><b className={materialDiffClass(audit.totals?.diff)}>{formatSignedWeight(audit.totals?.diff)}</b></div>
                   <div className="toolbar">
+                    <button className="secondary" type="button" onClick={() => setAuditPaymentStatus(audit, paymentMeta.nextStatus)}>{paymentMeta.actionLabel}</button>
                     <button className="secondary" type="button" onClick={() => loadAudit(audit)}>Cargar</button>
                     <button className="danger" type="button" onClick={() => onDeleteAudit(audit.id)}>Eliminar</button>
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           </>
         )}
@@ -2432,13 +2458,15 @@ function openShiftForm(shifts, activeDate, id, ownerUnlocked, fallbackName, comp
 
 function openMovementForm(shifts, activeDate, id, movementType, fallbackName, forcedShiftName = '', lockShift = false) {
   const movement = shifts.flatMap((shift) => (shift.movements || []).map((item) => ({ ...item, date: shift.date, shiftName: shift.shiftName }))).find((item) => item.id === id);
+  const requestedType = movementType === 'ventas' ? 'ingreso' : movementType;
+  const requestedIncomeType = movementType === 'ventas' ? 'ventas' : 'general';
   return {
     id: movement?.id || '',
     date: movement?.date || activeDate,
     shiftName: movement?.shiftName || forcedShiftName || 'Turno dia',
     lockShift,
-    type: movement?.type || movementType || 'gasto',
-    incomeType: movement?.incomeType || 'general',
+    type: movement?.type || requestedType || 'gasto',
+    incomeType: movement?.incomeType || requestedIncomeType,
     amount: movement?.amount ?? '',
     employeeName: movement?.employeeName || fallbackName || '',
     beneficiaryId: movement?.beneficiaryId || '',
@@ -2778,6 +2806,8 @@ function normalizeMaterialAudit(audit, index = 0) {
     date: audit?.date || today(),
     title: String(audit?.title || '').trim(),
     rows,
+    paymentStatus: audit?.paymentStatus === 'paid' ? 'paid' : 'pending',
+    paidAt: audit?.paidAt || '',
     totals: audit?.totals ? {
       expected: num(audit.totals.expected),
       reported: num(audit.totals.reported),
@@ -2817,6 +2847,8 @@ function buildMaterialAuditPayload({ date, title, rows, totals }) {
       reported: roundWeight(totals.reported),
       diff: roundWeight(totals.diff)
     },
+    paymentStatus: 'pending',
+    paidAt: '',
     savedAt: new Date().toISOString()
   };
 }
@@ -2868,6 +2900,17 @@ function auditMaterialSummary(audit) {
   if (!materials.length) return 'Material: sin detalle';
   if (materials.length > 5) return 'Materiales: Materiales varios';
   return `${materials.length === 1 ? 'Material' : 'Materiales'}: ${materials.join(', ')}`;
+}
+
+function materialAuditPaymentMeta(paymentStatus) {
+  const paid = paymentStatus === 'paid';
+  return {
+    label: paid ? 'Paga' : 'Por cobrar',
+    actionLabel: paid ? 'Marcar por cobrar' : 'Marcar paga',
+    nextStatus: paid ? 'pending' : 'paid',
+    statusClass: paid ? 'ok' : 'warn',
+    cardClass: paid ? 'payment-paid' : 'payment-pending'
+  };
 }
 
 function defaultUtilityFilters(date = today()) {

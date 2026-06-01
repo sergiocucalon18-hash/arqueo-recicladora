@@ -56,6 +56,10 @@ aside {
   padding: 24px 18px;
   background: linear-gradient(180deg, #173324, #10261b 72%, #0d2018);
   color: #fff;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .brand {
@@ -102,6 +106,8 @@ aside {
 .nav {
   display: grid;
   gap: 8px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .nav button {
@@ -133,7 +139,7 @@ aside {
 }
 
 .session-box {
-  margin-top: 18px;
+  margin-top: auto;
   padding: 14px;
   border-radius: 8px;
   background: rgba(255, 255, 255, .08);
@@ -393,13 +399,23 @@ main {
 
 .saved-audit-card {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(140px, auto) auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(120px, auto) minmax(140px, auto) auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfdfb;
+}
+
+.saved-audit-card.payment-pending {
+  border-color: #f1c989;
+  background: #fffaf0;
+}
+
+.saved-audit-card.payment-paid {
+  border-color: #b9dcc6;
+  background: #f2fbf5;
 }
 
 .saved-audit-card div {
